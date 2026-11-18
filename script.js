@@ -238,7 +238,7 @@
   const navToggle = document.getElementById('nav-toggle');
   const mobileMenu = document.getElementById('mobile-menu');
   const navLinks = Array.from(document.querySelectorAll('#desktop-nav a[data-nav]'));
-  const trackedSections = ['home', 'skills', 'about', 'services', 'projects', 'contact']
+  const trackedSections = ['home', 'about', 'skills', 'projects', 'services', 'contact']
     .map((id) => document.getElementById(id))
     .filter(Boolean);
 
@@ -703,8 +703,30 @@
   }
 
   /* =========================================
-     7. Boot
+     7. Full-Screen Opening Curtain Trigger
      ========================================= */
+  function runPageIntro() {
+    const intro = document.getElementById('page-intro');
+    if (!intro) return;
+
+    const finish = () => {
+      intro.classList.add('is-done');
+    };
+
+    const startReveal = () => {
+      if (intro.classList.contains('is-leaving')) return;
+      intro.classList.add('is-leaving');
+      setTimeout(finish, 780);
+    };
+
+    // Brief sleek black blink (~420ms) then smoothly part curtains to reveal portfolio
+    setTimeout(startReveal, 420);
+  }
+
+  /* =========================================
+     8. Boot
+     ========================================= */
+  runPageIntro();
   applyProfile();
   renderProjects();
   initTextRecreate();
