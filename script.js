@@ -1,18 +1,17 @@
 (() => {
   /* =========================================
-     1. End-Level 1080p HD Unified Inertial Scroll & Canvas Engine
+     1. Native-Speed 1080p HD Scroll Canvas Engine
      ========================================= */
   const FRAME_COUNT = 120;
-  const WHEEL_EASE = 8.5;
-  const FRAME_EASE = 10.5;
+  const FRAME_EASE = 24;
+  const SCROLL_ANIM_PACE = 1.85;
   const USE_BITMAP =
     window.location.protocol !== 'file:' && typeof window.createImageBitmap === 'function';
 
   const canvas = document.getElementById('scroll-canvas');
   const ctx = canvas.getContext('2d', { alpha: false });
 
-  // Raw blobs + permanently pinned 1:1 viewport-sized ImageBitmaps (zero eviction, zero scroll decode)
-  const blobs = new Array(FRAME_COUNT).fill(null);
+  // Permanently pinned device-matched ImageBitmaps — zero eviction, zero scroll decode
   const frames = new Array(FRAME_COUNT).fill(null);
 
   let width = 0;
@@ -23,17 +22,11 @@
   let maxScrollCache = 1;
   let cachedSectionOffsets = [];
 
-  // Unified inertial scroll state
-  let targetScrollY = window.scrollY;
-  let smoothScrollY = window.scrollY;
-  let inertialActive = false;
-
   let targetFrame = 0;
   let currentFrame = 0;
   let lastRenderedPos = -1;
   let rafId = null;
   let lastTimestamp = 0;
-  let isProgrammaticScroll = false;
 
   function frameSrc(index) {
     return `./frames/frame-${String(index + 1).padStart(3, '0')}.webp`;
@@ -48,7 +41,7 @@
   }
 
   function scrollYToFrame(scrollY) {
-    const progress = Math.min(1, Math.max(0, scrollY / maxScrollCache));
+    const progress = Math.min(1, Math.max(0, (scrollY / maxScrollCache) * SCROLL_ANIM_PACE));
     return progress * (FRAME_COUNT - 1);
   }
 
@@ -58,20 +51,26 @@
     updateLayoutCaches();
 
     const rawDpr = window.devicePixelRatio || 1;
-    // Full razor-sharp 1080p HD clarity up to 1920px wide backing resolution
-    const maxScale = Math.max(
-      1,
-      Math.min(2, 1920 / Math.max(width, 1), (1080 / Math.max(height, 1)) * 1.45),
-    );
+    const maxScale =
+      width < 768
+        ? Math.min(rawDpr, 1.5)
+        : Math.max(1, Math.min(2, 1920 / Math.max(width, 1), (1080 / Math.max(height, 1)) * 1.45));
     canvasScale = Math.min(rawDpr, maxScale);
 
     canvas.width = Math.max(1, Math.round(width * canvasScale));
     canvas.height = Math.max(1, Math.round(height * canvasScale));
 
-    // Pre-size decoded GPU bitmaps to match display resolution (max 1920x1080) for ultra-fast GPU blits
-    const coverScale = Math.max(canvas.width / 1920, canvas.height / 1080);
-    decodeTargetW = Math.min(1920, Math.max(960, Math.round(1920 * coverScale)));
-    decodeTargetH = Math.round((decodeTargetW * 9) / 16);
+    // Device-tuned bitmap sizing: full 1920x1080 on laptops/desktops, 1280x720 on tablets, 960x540 on phones
+    if (width >= 1024) {
+      decodeTargetW = 1920;
+      decodeTargetH = 1080;
+    } else if (width >= 768) {
+      decodeTargetW = 1280;
+      decodeTargetH = 720;
+    } else {
+      decodeTargetW = 960;
+      decodeTargetH = 540;
+    }
 
     ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
     ctx.imageSmoothingEnabled = true;
@@ -113,7 +112,7 @@
 
   function renderFrame(position, force = false) {
     const clamped = Math.min(FRAME_COUNT - 1, Math.max(0, position));
-    if (!force && Math.abs(clamped - lastRenderedPos) < 0.0015) return;
+    if (!force && Math.abs(clamped - lastRenderedPos) < 0.002) return;
 
     const baseIdx = Math.floor(clamped);
     const nextIdx = Math.min(FRAME_COUNT - 1, baseIdx + 1);
@@ -134,12 +133,12 @@
     ctx.fillRect(0, 0, width, height);
     ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
 
-    // Sub-frame liquid blending between permanently pinned GPU frames -> true 60/120fps motion
+    // Sub-frame continuous blending between pinned GPU frames -> silky 60/120fps motion
     if (
       resolvedBase === baseIdx &&
       nextIdx !== baseIdx &&
-      frac > 0.015 &&
-      frac < 0.985 &&
+      frac > 0.02 &&
+      frac < 0.98 &&
       frames[nextIdx]
     ) {
       ctx.globalAlpha = frac;
@@ -154,46 +153,19 @@
     const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, 0.05) : 1 / 60;
     lastTimestamp = timestamp;
 
-    let keepRunning = false;
-
-    // 1. Unified inertial smooth scroll (desktop mouse wheel & anchor jumps)
-    if (inertialActive) {
-      const scrollDelta = targetScrollY - smoothScrollY;
-      if (Math.abs(scrollDelta) < 0.35) {
-        smoothScrollY = targetScrollY;
-        inertialActive = false;
-      } else {
-        const sFactor = 1 - Math.exp(-WHEEL_EASE * dt);
-        smoothScrollY += scrollDelta * sFactor;
-        keepRunning = true;
-      }
-
-      isProgrammaticScroll = true;
-      window.scrollTo(0, smoothScrollY);
-      isProgrammaticScroll = false;
-
-      targetFrame = scrollYToFrame(smoothScrollY);
-      updateHeaderAndNav(smoothScrollY);
-    }
-
-    // 2. Silky canvas frame interpolation in the exact same RAF tick
     const frameDelta = targetFrame - currentFrame;
-    if (Math.abs(frameDelta) < 0.003) {
+    if (Math.abs(frameDelta) < 0.008) {
       currentFrame = targetFrame;
       renderFrame(currentFrame);
-    } else {
-      const fFactor = 1 - Math.exp(-FRAME_EASE * dt);
-      currentFrame += frameDelta * fFactor;
-      renderFrame(currentFrame);
-      keepRunning = true;
-    }
-
-    if (keepRunning) {
-      rafId = requestAnimationFrame(tick);
-    } else {
       rafId = null;
       lastTimestamp = 0;
+      return;
     }
+
+    const factor = 1 - Math.exp(-FRAME_EASE * dt);
+    currentFrame += frameDelta * factor;
+    renderFrame(currentFrame);
+    rafId = requestAnimationFrame(tick);
   }
 
   function scheduleLoop() {
@@ -204,65 +176,11 @@
   }
 
   function onNativeScroll() {
-    if (isProgrammaticScroll) return;
-    // User dragged scrollbar, used touch, or keyboard -> stay 100% native and synced
-    inertialActive = false;
-    smoothScrollY = window.scrollY;
-    targetScrollY = window.scrollY;
-    targetFrame = scrollYToFrame(window.scrollY);
+    const y = window.scrollY;
+    targetFrame = scrollYToFrame(y);
     scheduleLoop();
-    updateHeaderAndNav(window.scrollY);
+    updateHeaderAndNav(y);
   }
-
-  function smoothScrollToY(destY) {
-    targetScrollY = Math.min(maxScrollCache, Math.max(0, destY));
-    smoothScrollY = window.scrollY;
-    inertialActive = true;
-    scheduleLoop();
-  }
-
-  // Lenis-style inertial wheel smoothing (eliminates jagged Windows mouse-wheel jumps)
-  const prefersReducedMotion =
-    window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-  function onWheel(e) {
-    if (prefersReducedMotion || e.ctrlKey) return;
-    // Do not hijack scrolling inside open modal or scrollable overlays
-    const openModal = document.getElementById('contact-modal');
-    if (openModal && !openModal.hidden) return;
-    const openDrawer = document.getElementById('mobile-menu');
-    if (openDrawer && !openDrawer.hidden) return;
-
-    e.preventDefault();
-
-    let deltaY = e.deltaY;
-    if (e.deltaMode === 1) deltaY *= 32;
-    else if (e.deltaMode === 2) deltaY *= height * 0.85;
-
-    if (!inertialActive) {
-      smoothScrollY = window.scrollY;
-      targetScrollY = window.scrollY;
-    }
-
-    targetScrollY = Math.min(maxScrollCache, Math.max(0, targetScrollY + deltaY));
-    inertialActive = true;
-    scheduleLoop();
-  }
-
-  window.addEventListener('wheel', onWheel, { passive: false });
-
-  // Smooth anchor link navigation synced directly into our inertial scroller
-  document.addEventListener('click', (e) => {
-    const link = e.target.closest('a[href^="#"]');
-    if (!link) return;
-    const hash = link.getAttribute('href');
-    if (!hash || hash.length < 2) return;
-    const targetEl = document.querySelector(hash);
-    if (!targetEl) return;
-    e.preventDefault();
-    const top = Math.max(0, targetEl.getBoundingClientRect().top + window.scrollY);
-    smoothScrollToY(top);
-  });
 
   function decodeFrame(index) {
     if (USE_BITMAP) {
@@ -270,12 +188,14 @@
         .then((res) => (res.ok ? res.blob() : null))
         .then((blob) => {
           if (!blob) return null;
-          blobs[index] = blob;
-          return createImageBitmap(blob, {
-            resizeWidth: decodeTargetW,
-            resizeHeight: decodeTargetH,
-            resizeQuality: 'high',
-          }).catch(() => createImageBitmap(blob));
+          if (decodeTargetW < 1920) {
+            return createImageBitmap(blob, {
+              resizeWidth: decodeTargetW,
+              resizeHeight: decodeTargetH,
+              resizeQuality: 'high',
+            }).catch(() => createImageBitmap(blob));
+          }
+          return createImageBitmap(blob);
         })
         .then((bm) => {
           if (!bm) return;
