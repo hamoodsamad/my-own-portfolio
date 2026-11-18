@@ -1,31 +1,42 @@
 (() => {
   /* =========================================
-     1. Liquid-Smooth Zero-Freeze Scroll Canvas Engine
+     1. End-Level 1080p HD Unified Inertial Scroll & Canvas Engine
      ========================================= */
   const FRAME_COUNT = 120;
-  const SMOOTHING = 6.5;
+  const WHEEL_EASE = 8.5;
+  const FRAME_EASE = 10.5;
   const USE_BITMAP =
     window.location.protocol !== 'file:' && typeof window.createImageBitmap === 'function';
 
   const canvas = document.getElementById('scroll-canvas');
   const ctx = canvas.getContext('2d', { alpha: false });
 
-  // All 120 frames permanently pinned once decoded — ZERO eviction, ZERO decode during scroll
+  // Raw blobs + permanently pinned 1:1 viewport-sized ImageBitmaps (zero eviction, zero scroll decode)
+  const blobs = new Array(FRAME_COUNT).fill(null);
   const frames = new Array(FRAME_COUNT).fill(null);
 
   let width = 0;
   let height = 0;
+  let canvasScale = 1;
+  let decodeTargetW = 1920;
+  let decodeTargetH = 1080;
   let maxScrollCache = 1;
   let cachedSectionOffsets = [];
+
+  // Unified inertial scroll state
+  let targetScrollY = window.scrollY;
+  let smoothScrollY = window.scrollY;
+  let inertialActive = false;
 
   let targetFrame = 0;
   let currentFrame = 0;
   let lastRenderedPos = -1;
   let rafId = null;
   let lastTimestamp = 0;
+  let isProgrammaticScroll = false;
 
   function frameSrc(index) {
-    return `./frames/frame-${String(index + 1).padStart(3, '0')}.jpg`;
+    return `./frames/frame-${String(index + 1).padStart(3, '0')}.webp`;
   }
 
   function updateLayoutCaches() {
@@ -36,8 +47,9 @@
     }));
   }
 
-  function getScrollProgress() {
-    return Math.min(1, Math.max(0, window.scrollY / maxScrollCache));
+  function scrollYToFrame(scrollY) {
+    const progress = Math.min(1, Math.max(0, scrollY / maxScrollCache));
+    return progress * (FRAME_COUNT - 1);
   }
 
   function resize() {
@@ -46,17 +58,22 @@
     updateLayoutCaches();
 
     const rawDpr = window.devicePixelRatio || 1;
-    // Cap canvas backing size cleanly for blazing-fast GPU fill-rate on all devices
+    // Full razor-sharp 1080p HD clarity up to 1920px wide backing resolution
     const maxScale = Math.max(
       1,
-      Math.min(1.35, 1440 / Math.max(width, 1), (810 / Math.max(height, 1)) * 1.4),
+      Math.min(2, 1920 / Math.max(width, 1), (1080 / Math.max(height, 1)) * 1.45),
     );
-    const scale = Math.min(rawDpr, maxScale);
+    canvasScale = Math.min(rawDpr, maxScale);
 
-    canvas.width = Math.max(1, Math.round(width * scale));
-    canvas.height = Math.max(1, Math.round(height * scale));
+    canvas.width = Math.max(1, Math.round(width * canvasScale));
+    canvas.height = Math.max(1, Math.round(height * canvasScale));
 
-    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    // Pre-size decoded GPU bitmaps to match display resolution (max 1920x1080) for ultra-fast GPU blits
+    const coverScale = Math.max(canvas.width / 1920, canvas.height / 1080);
+    decodeTargetW = Math.min(1920, Math.max(960, Math.round(1920 * coverScale)));
+    decodeTargetH = Math.round((decodeTargetW * 9) / 16);
+
+    ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
@@ -69,7 +86,7 @@
     const containScale = Math.min(width / imgW, height / imgH);
     const progress = framePos / Math.max(1, FRAME_COUNT - 1);
 
-    // Pull portrait slightly further back at top (tight close-up) -> natural balanced framing throughout
+    // Pull portrait slightly back at top (tight close-up) -> natural balanced framing throughout
     const pullBack = 0.78 + progress * 0.14;
     const isPortrait = height > width;
     const baseScale = isPortrait
@@ -96,7 +113,7 @@
 
   function renderFrame(position, force = false) {
     const clamped = Math.min(FRAME_COUNT - 1, Math.max(0, position));
-    if (!force && Math.abs(clamped - lastRenderedPos) < 0.002) return;
+    if (!force && Math.abs(clamped - lastRenderedPos) < 0.0015) return;
 
     const baseIdx = Math.floor(clamped);
     const nextIdx = Math.min(FRAME_COUNT - 1, baseIdx + 1);
@@ -117,12 +134,12 @@
     ctx.fillRect(0, 0, width, height);
     ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
 
-    // Sub-frame continuous crossfade between pinned GPU frames -> true 60/120fps liquid motion
+    // Sub-frame liquid blending between permanently pinned GPU frames -> true 60/120fps motion
     if (
       resolvedBase === baseIdx &&
       nextIdx !== baseIdx &&
-      frac > 0.02 &&
-      frac < 0.98 &&
+      frac > 0.015 &&
+      frac < 0.985 &&
       frames[nextIdx]
     ) {
       ctx.globalAlpha = frac;
@@ -137,40 +154,129 @@
     const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, 0.05) : 1 / 60;
     lastTimestamp = timestamp;
 
-    const delta = targetFrame - currentFrame;
-    if (Math.abs(delta) < 0.004) {
-      currentFrame = targetFrame;
-      renderFrame(currentFrame);
-      rafId = null;
-      lastTimestamp = 0;
-      return;
+    let keepRunning = false;
+
+    // 1. Unified inertial smooth scroll (desktop mouse wheel & anchor jumps)
+    if (inertialActive) {
+      const scrollDelta = targetScrollY - smoothScrollY;
+      if (Math.abs(scrollDelta) < 0.35) {
+        smoothScrollY = targetScrollY;
+        inertialActive = false;
+      } else {
+        const sFactor = 1 - Math.exp(-WHEEL_EASE * dt);
+        smoothScrollY += scrollDelta * sFactor;
+        keepRunning = true;
+      }
+
+      isProgrammaticScroll = true;
+      window.scrollTo(0, smoothScrollY);
+      isProgrammaticScroll = false;
+
+      targetFrame = scrollYToFrame(smoothScrollY);
+      updateHeaderAndNav(smoothScrollY);
     }
 
-    const factor = 1 - Math.exp(-SMOOTHING * dt);
-    currentFrame += delta * factor;
-    renderFrame(currentFrame);
+    // 2. Silky canvas frame interpolation in the exact same RAF tick
+    const frameDelta = targetFrame - currentFrame;
+    if (Math.abs(frameDelta) < 0.003) {
+      currentFrame = targetFrame;
+      renderFrame(currentFrame);
+    } else {
+      const fFactor = 1 - Math.exp(-FRAME_EASE * dt);
+      currentFrame += frameDelta * fFactor;
+      renderFrame(currentFrame);
+      keepRunning = true;
+    }
 
-    rafId = requestAnimationFrame(tick);
+    if (keepRunning) {
+      rafId = requestAnimationFrame(tick);
+    } else {
+      rafId = null;
+      lastTimestamp = 0;
+    }
   }
 
-  function scheduleRender() {
+  function scheduleLoop() {
     if (rafId === null) {
       lastTimestamp = 0;
       rafId = requestAnimationFrame(tick);
     }
   }
 
-  function onScroll() {
-    targetFrame = getScrollProgress() * (FRAME_COUNT - 1);
-    scheduleRender();
-    updateHeaderAndNav();
+  function onNativeScroll() {
+    if (isProgrammaticScroll) return;
+    // User dragged scrollbar, used touch, or keyboard -> stay 100% native and synced
+    inertialActive = false;
+    smoothScrollY = window.scrollY;
+    targetScrollY = window.scrollY;
+    targetFrame = scrollYToFrame(window.scrollY);
+    scheduleLoop();
+    updateHeaderAndNav(window.scrollY);
   }
+
+  function smoothScrollToY(destY) {
+    targetScrollY = Math.min(maxScrollCache, Math.max(0, destY));
+    smoothScrollY = window.scrollY;
+    inertialActive = true;
+    scheduleLoop();
+  }
+
+  // Lenis-style inertial wheel smoothing (eliminates jagged Windows mouse-wheel jumps)
+  const prefersReducedMotion =
+    window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function onWheel(e) {
+    if (prefersReducedMotion || e.ctrlKey) return;
+    // Do not hijack scrolling inside open modal or scrollable overlays
+    const openModal = document.getElementById('contact-modal');
+    if (openModal && !openModal.hidden) return;
+    const openDrawer = document.getElementById('mobile-menu');
+    if (openDrawer && !openDrawer.hidden) return;
+
+    e.preventDefault();
+
+    let deltaY = e.deltaY;
+    if (e.deltaMode === 1) deltaY *= 32;
+    else if (e.deltaMode === 2) deltaY *= height * 0.85;
+
+    if (!inertialActive) {
+      smoothScrollY = window.scrollY;
+      targetScrollY = window.scrollY;
+    }
+
+    targetScrollY = Math.min(maxScrollCache, Math.max(0, targetScrollY + deltaY));
+    inertialActive = true;
+    scheduleLoop();
+  }
+
+  window.addEventListener('wheel', onWheel, { passive: false });
+
+  // Smooth anchor link navigation synced directly into our inertial scroller
+  document.addEventListener('click', (e) => {
+    const link = e.target.closest('a[href^="#"]');
+    if (!link) return;
+    const hash = link.getAttribute('href');
+    if (!hash || hash.length < 2) return;
+    const targetEl = document.querySelector(hash);
+    if (!targetEl) return;
+    e.preventDefault();
+    const top = Math.max(0, targetEl.getBoundingClientRect().top + window.scrollY);
+    smoothScrollToY(top);
+  });
 
   function decodeFrame(index) {
     if (USE_BITMAP) {
       return fetch(frameSrc(index))
         .then((res) => (res.ok ? res.blob() : null))
-        .then((blob) => (blob ? createImageBitmap(blob) : null))
+        .then((blob) => {
+          if (!blob) return null;
+          blobs[index] = blob;
+          return createImageBitmap(blob, {
+            resizeWidth: decodeTargetW,
+            resizeHeight: decodeTargetH,
+            resizeQuality: 'high',
+          }).catch(() => createImageBitmap(blob));
+        })
         .then((bm) => {
           if (!bm) return;
           frames[index] = bm;
@@ -245,14 +351,14 @@
   let lastHeaderScrolled = false;
   let lastActiveNavId = '';
 
-  function updateHeaderAndNav() {
-    const scrolled = window.scrollY > 24;
+  function updateHeaderAndNav(scrollPos = window.scrollY) {
+    const scrolled = scrollPos > 24;
     if (header && scrolled !== lastHeaderScrolled) {
       lastHeaderScrolled = scrolled;
       header.classList.toggle('is-scrolled', scrolled);
     }
 
-    const probe = window.scrollY + height * 0.35;
+    const probe = scrollPos + height * 0.35;
     let activeId = 'home';
     for (let i = 0; i < cachedSectionOffsets.length; i++) {
       if (probe >= cachedSectionOffsets[i].top) {
@@ -455,7 +561,7 @@
     });
 
     updateLayoutCaches();
-    onScroll();
+    onNativeScroll();
   }
 
   /* =========================================
@@ -574,27 +680,40 @@
   // Hidden Admin Lock tucked behind bottom (footer) HS logo only
   bindLogoAdminToggle('footer-logo-wrap', 'admin-lock-trigger', 'footer-admin-link');
 
-  // Live cross-tab sync if user updates projects/profile in admin.html
-  window.addEventListener('storage', () => {
-    applyProfile();
-    renderProjects(store ? store.getProjects() : []);
-  });
-
+  let cloudSyncInFlight = false;
   async function syncFromCloud() {
-    if (!store) return;
+    if (!store || cloudSyncInFlight) return;
+    cloudSyncInFlight = true;
     try {
       const [{ profile }, { projects }] = await Promise.all([
         store.fetchProfile(),
         store.fetchProjects(),
       ]);
       if (profile) applyProfile(profile);
-      if (Array.isArray(projects) && projects.length > 0) {
+      // Always render latest cloud projects (including when 0 projects remain after delete!)
+      if (Array.isArray(projects)) {
         renderProjects(projects);
       }
     } catch {
       // Keep local fallback smoothly
+    } finally {
+      cloudSyncInFlight = false;
     }
   }
+
+  // Real-time live sync: BroadcastChannel + storage + Supabase Realtime + tab focus
+  if (store && typeof store.subscribeToLiveUpdates === 'function') {
+    store.subscribeToLiveUpdates(() => {
+      applyProfile();
+      renderProjects(store.getProjects());
+      syncFromCloud();
+    });
+  }
+
+  window.addEventListener('focus', syncFromCloud);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') syncFromCloud();
+  });
 
   /* =========================================
      6. Hover Text Recreate Engine (Zero Shift)
@@ -732,20 +851,20 @@
   initTextRecreate();
   syncFromCloud();
 
-  targetFrame = getScrollProgress() * (FRAME_COUNT - 1);
+  targetFrame = scrollYToFrame(window.scrollY);
   currentFrame = targetFrame;
 
   resize();
   preloadAllFrames();
   updateHeaderAndNav();
 
-  window.addEventListener('scroll', onScroll, { passive: true });
+  window.addEventListener('scroll', onNativeScroll, { passive: true });
   window.addEventListener('resize', resize, { passive: true });
   window.addEventListener(
     'load',
     () => {
       updateLayoutCaches();
-      onScroll();
+      onNativeScroll();
     },
     { passive: true },
   );

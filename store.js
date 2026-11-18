@@ -87,6 +87,25 @@
   let supabaseClient = null;
   let activeAdminEmail = DEFAULT_SUPABASE_CONFIG.adminEmail;
   let initPromise = null;
+  const syncChannel =
+    typeof window.BroadcastChannel === 'function'
+      ? new window.BroadcastChannel('hs_portfolio_sync')
+      : null;
+
+  function notifyCrossTab(type = 'refresh') {
+    try {
+      localStorage.setItem('hs_portfolio_sync_ping', `${type}:${Date.now()}`);
+    } catch {
+      // ignore
+    }
+    if (syncChannel) {
+      try {
+        syncChannel.postMessage({ type, ts: Date.now() });
+      } catch {
+        // ignore
+      }
+    }
+  }
 
   async function initSupabase() {
     if (initPromise) return initPromise;
@@ -408,9 +427,11 @@
           ),
         );
       }
+      notifyCrossTab('profile');
       return { profile: merged, engine: 'Supabase Cloud' };
     }
 
+    notifyCrossTab('profile');
     return { profile: merged, engine: 'Local Storage' };
   }
 
@@ -424,14 +445,12 @@
           .order('created_at', { ascending: false });
 
         if (!error && Array.isArray(data)) {
-          if (data.length > 0) {
-            safeWrite(KEYS.projects, data);
-            return { projects: data, engine: 'Supabase Cloud' };
-          }
-          return { projects: getProjectsLocal(), engine: 'Supabase Cloud' };
+          // Always trust Supabase Cloud as the single source of truth (even when 0 rows)
+          safeWrite(KEYS.projects, data);
+          return { projects: data, engine: 'Supabase Cloud' };
         }
       } catch {
-        // Fallback below
+        // Offline fallback below
       }
     }
     return { projects: getProjectsLocal(), engine: 'Local Storage' };
@@ -449,15 +468,26 @@
 
     const sb = await initSupabase();
     if (sb) {
-      const { error } = await sb.from('projects').insert([project]);
+      const { data: inserted, error } = await sb
+        .from('projects')
+        .insert([project])
+        .select('id');
       if (error) {
         throw new Error(errMsg(error, 'Failed to publish project to Supabase. Please re-login.'));
       }
-      return await fetchProjects();
+      if (!inserted || inserted.length === 0) {
+        throw new Error(
+          'Supabase blocked adding this project (0 rows inserted). Please re-login in Admin Studio.',
+        );
+      }
+      const res = await fetchProjects();
+      notifyCrossTab('projects');
+      return res;
     }
 
     const next = [project, ...getProjectsLocal()];
     safeWrite(KEYS.projects, next);
+    notifyCrossTab('projects');
     return { projects: next, engine: 'Local Storage' };
   }
 
@@ -472,33 +502,103 @@
 
     const sb = await initSupabase();
     if (sb) {
-      const { error } = await sb.from('projects').update(updates).eq('id', id);
+      const { data: updated, error } = await sb
+        .from('projects')
+        .update(updates)
+        .eq('id', id)
+        .select('id');
       if (error) {
         throw new Error(errMsg(error, 'Failed to update project in Supabase.'));
       }
-      return await fetchProjects();
+      if (!updated || updated.length === 0) {
+        throw new Error(
+          'Project was not updated in Supabase (0 rows matched or permission denied). Please re-login.',
+        );
+      }
+      const res = await fetchProjects();
+      notifyCrossTab('projects');
+      return res;
     }
 
     const next = getProjectsLocal().map((item) =>
       item.id === id ? { ...item, ...updates } : item,
     );
     safeWrite(KEYS.projects, next);
+    notifyCrossTab('projects');
     return { projects: next, engine: 'Local Storage' };
   }
 
   async function deleteProject(id) {
     const sb = await initSupabase();
     if (sb) {
-      const { error } = await sb.from('projects').delete().eq('id', id);
+      const { data: deleted, error } = await sb
+        .from('projects')
+        .delete()
+        .eq('id', id)
+        .select('id');
       if (error) {
         throw new Error(errMsg(error, 'Failed to delete project from Supabase.'));
       }
-      return await fetchProjects();
+      if (!deleted || deleted.length === 0) {
+        throw new Error(
+          'Delete did not remove any row in Supabase (permission denied or already removed). Check RLS policies & re-login.',
+        );
+      }
+      const res = await fetchProjects();
+      notifyCrossTab('projects');
+      return res;
     }
 
     const next = getProjectsLocal().filter((item) => item.id !== id);
     safeWrite(KEYS.projects, next);
+    notifyCrossTab('projects');
     return { projects: next, engine: 'Local Storage' };
+  }
+
+  function subscribeToLiveUpdates(onChange) {
+    const cleanups = [];
+
+    if (syncChannel) {
+      const onMsg = () => onChange();
+      syncChannel.addEventListener('message', onMsg);
+      cleanups.push(() => syncChannel.removeEventListener('message', onMsg));
+    }
+
+    const onStorage = (e) => {
+      if (!e.key || e.key.startsWith('hs_portfolio_')) onChange();
+    };
+    window.addEventListener('storage', onStorage);
+    cleanups.push(() => window.removeEventListener('storage', onStorage));
+
+    initSupabase().then((sb) => {
+      if (!sb || typeof sb.channel !== 'function') return;
+      try {
+        const ch = sb
+          .channel('portfolio-live-sync')
+          .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'projects' },
+            () => onChange(),
+          )
+          .on(
+            'postgres_changes',
+            { event: '*', schema: 'public', table: 'site_profile' },
+            () => onChange(),
+          )
+          .subscribe();
+        cleanups.push(() => {
+          try {
+            sb.removeChannel(ch);
+          } catch {
+            // ignore
+          }
+        });
+      } catch {
+        // Realtime optional
+      }
+    });
+
+    return () => cleanups.forEach((fn) => fn());
   }
 
   async function fetchInquiries() {
@@ -651,6 +751,7 @@
     isAdminUnlocked,
     setAdminUnlocked,
     resetAllData,
+    subscribeToLiveUpdates,
     compressImageFile,
     normalizeExternalUrl,
   };

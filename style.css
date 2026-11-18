@@ -32,7 +32,6 @@
 }
 
 html {
-  scroll-behavior: smooth;
   background-color: #050308;
   overflow-x: clip;
 }
