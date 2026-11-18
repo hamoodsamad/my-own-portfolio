@@ -1,10 +1,10 @@
 (() => {
   /* =========================================
-     1. Native-Speed 1080p HD Scroll Canvas Engine
+     1. Native-Speed 4K Ultra HD Scroll Canvas Engine
      ========================================= */
-  const FRAME_COUNT = 120;
+  const FRAME_COUNT = 238;
   const FRAME_EASE = 24;
-  const SCROLL_ANIM_PACE = 1.85;
+  const SCROLL_ANIM_PACE = 2.1;
   const USE_BITMAP =
     window.location.protocol !== 'file:' && typeof window.createImageBitmap === 'function';
 
@@ -17,8 +17,8 @@
   let width = 0;
   let height = 0;
   let canvasScale = 1;
-  let decodeTargetW = 1920;
-  let decodeTargetH = 1080;
+  let decodeTargetW = 3840;
+  let decodeTargetH = 2160;
   let maxScrollCache = 1;
   let cachedSectionOffsets = [];
 
@@ -51,25 +51,32 @@
     updateLayoutCaches();
 
     const rawDpr = window.devicePixelRatio || 1;
-    const maxScale =
-      width < 768
-        ? Math.min(rawDpr, 1.5)
-        : Math.max(1, Math.min(2, 1920 / Math.max(width, 1), (1080 / Math.max(height, 1)) * 1.45));
-    canvasScale = Math.min(rawDpr, maxScale);
+    // On 4K / 32-inch displays (and Retina displays), scale up to native 2x for razor-sharp pixel fidelity
+    canvasScale = Math.min(rawDpr, 2);
 
     canvas.width = Math.max(1, Math.round(width * canvasScale));
     canvas.height = Math.max(1, Math.round(height * canvasScale));
 
-    // Device-tuned bitmap sizing: full 1920x1080 on laptops/desktops, 1280x720 on tablets, 960x540 on phones
-    if (width >= 1024) {
+    const physicalW = Math.round(width * canvasScale);
+    const physicalH = Math.round(height * canvasScale);
+
+    // Device-tuned bitmap sizing:
+    // Full 4K (3840x2160) for 4K / 32-inch displays and large high-DPI screens
+    // 2560x1440 for QHD / 1440p displays
+    // 1920x1080 for standard 1080p laptops
+    // 1280x720 / 960x540 for tablets & mobile phones
+    if (physicalW >= 2560 || physicalH >= 1440) {
+      decodeTargetW = 3840;
+      decodeTargetH = 2160;
+    } else if (physicalW >= 1440 || physicalH >= 900) {
+      decodeTargetW = 2560;
+      decodeTargetH = 1440;
+    } else if (physicalW >= 960) {
       decodeTargetW = 1920;
       decodeTargetH = 1080;
-    } else if (width >= 768) {
+    } else {
       decodeTargetW = 1280;
       decodeTargetH = 720;
-    } else {
-      decodeTargetW = 960;
-      decodeTargetH = 540;
     }
 
     ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
@@ -81,22 +88,28 @@
   }
 
   function computeDrawRect(imgW, imgH, framePos) {
+    // Pure cover scaling: completely fills the viewport edge-to-edge with no distortion
     const coverScale = Math.max(width / imgW, height / imgH);
-    const containScale = Math.min(width / imgW, height / imgH);
-    const progress = framePos / Math.max(1, FRAME_COUNT - 1);
+    const drawW = imgW * coverScale;
+    const drawH = imgH * coverScale;
 
-    // Pull portrait slightly back at top (tight close-up) -> natural balanced framing throughout
-    const pullBack = 0.78 + progress * 0.14;
-    const isPortrait = height > width;
-    const baseScale = isPortrait
-      ? coverScale * 0.68 + containScale * 0.24
-      : coverScale;
-    const scale = baseScale * pullBack;
-
-    const drawW = imgW * scale;
-    const drawH = imgH * scale;
+    // Horizontal centering: Subject is at 50% X in 3840x2160, so this perfectly centers on all devices
     const offsetX = (width - drawW) * 0.5;
-    const offsetY = (height - drawH) * 0.48;
+
+    // Vertical positioning:
+    // Subject face/eyes are at ~35% from the top of the 16:9 image
+    const isPortrait = height > width;
+    let offsetY;
+    if (isPortrait) {
+      // In portrait (mobile & tablet), drawH > height.
+      // Align the subject naturally at ~32% of viewport height so the portrait is full life-size,
+      // never shrunk, never squeezed, and never cropped into empty space.
+      const targetOffsetY = height * 0.32 - drawH * 0.35;
+      offsetY = Math.max(height - drawH, Math.min(0, targetOffsetY));
+    } else {
+      // Landscape (desktop, 32" monitor, laptop): center vertically
+      offsetY = (height - drawH) * 0.5;
+    }
 
     return { offsetX, offsetY, drawW, drawH };
   }
@@ -188,7 +201,7 @@
         .then((res) => (res.ok ? res.blob() : null))
         .then((blob) => {
           if (!blob) return null;
-          if (decodeTargetW < 1920) {
+          if (decodeTargetW < 3840) {
             return createImageBitmap(blob, {
               resizeWidth: decodeTargetW,
               resizeHeight: decodeTargetH,
@@ -231,8 +244,8 @@
     const seen = new Set([initialIndex]);
     const queue = [];
 
-    // Interleaved progressive order: every 4th frame first, then every 2nd, then remaining
-    for (const step of [4, 2, 1]) {
+    // Interleaved progressive order: 8 -> 4 -> 2 -> 1
+    for (const step of [8, 4, 2, 1]) {
       for (let i = 0; i < FRAME_COUNT; i += step) {
         if (!seen.has(i)) {
           seen.add(i);
@@ -242,7 +255,7 @@
     }
 
     decodeFrame(initialIndex).then(() => {
-      const CONCURRENCY = 4;
+      const CONCURRENCY = 6;
       let cursor = 0;
 
       function worker() {
