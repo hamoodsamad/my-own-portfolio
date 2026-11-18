@@ -34,6 +34,7 @@
 html {
   scroll-behavior: smooth;
   background-color: #050308;
+  overflow-x: hidden;
   overflow-x: clip;
 }
 
@@ -46,6 +47,7 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overscroll-behavior: none;
+  overflow-x: hidden;
   overflow-x: clip;
 }
 
@@ -1443,6 +1445,7 @@ button {
   justify-content: center;
   margin-top: clamp(16px, 2.5vh, 28px);
   padding-inline: clamp(10px, 3vw, 40px);
+  overflow: hidden;
 }
 
 .carousel-stage {

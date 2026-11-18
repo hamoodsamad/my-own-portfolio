@@ -90,30 +90,30 @@
   }
 
   function computeDrawRect(imgW, imgH, framePos) {
-    // Pure cover scaling: completely fills the viewport edge-to-edge with no distortion
+    const isPortrait = height > width;
+
+    if (isPortrait) {
+      // In portrait (mobile phones and portrait tablets):
+      // Display the complete original 16:9 video composition without excessive zooming or face cropping.
+      // Sizing to full viewport width displays 100% of the character and both atmospheric smoke sides.
+      const scale = width / imgW;
+      const drawW = Math.round(imgW * scale);
+      const drawH = Math.round(imgH * scale);
+      const offsetX = 0;
+      // Position naturally in the upper-middle hero area behind the hero title and profile summary
+      const offsetY = Math.round((height - drawH) * 0.35);
+
+      return { offsetX, offsetY, drawW, drawH, isPortrait: true };
+    }
+
+    // Landscape (desktop, 4K monitors, laptops, and rotated landscape phones):
     const coverScale = Math.max(width / imgW, height / imgH);
     const drawW = imgW * coverScale;
     const drawH = imgH * coverScale;
-
-    // Horizontal centering: Subject is at 50% X in 3840x2160, so this perfectly centers on all devices
     const offsetX = (width - drawW) * 0.5;
+    const offsetY = (height - drawH) * 0.5;
 
-    // Vertical positioning:
-    // Subject face/eyes are at ~35% from the top of the 16:9 image
-    const isPortrait = height > width;
-    let offsetY;
-    if (isPortrait) {
-      // In portrait (mobile & tablet), drawH > height.
-      // Align the subject naturally at ~32% of viewport height so the portrait is full life-size,
-      // never shrunk, never squeezed, and never cropped into empty space.
-      const targetOffsetY = height * 0.32 - drawH * 0.35;
-      offsetY = Math.max(height - drawH, Math.min(0, targetOffsetY));
-    } else {
-      // Landscape (desktop, 32" monitor, laptop): center vertically
-      offsetY = (height - drawH) * 0.5;
-    }
-
-    return { offsetX, offsetY, drawW, drawH };
+    return { offsetX, offsetY, drawW, drawH, isPortrait: false };
   }
 
   function findNearestFrame(index) {
@@ -138,13 +138,31 @@
     const imgH = baseImg.naturalHeight || baseImg.height;
     if (!imgW || !imgH) return;
 
-    const { offsetX, offsetY, drawW, drawH } = computeDrawRect(imgW, imgH, clamped);
+    const { offsetX, offsetY, drawW, drawH, isPortrait } = computeDrawRect(imgW, imgH, clamped);
 
     ctx.globalAlpha = 1;
     ctx.fillStyle = '#050308';
     ctx.fillRect(0, 0, width, height);
-    // Draw 100% crisp single master 4K frame — zero ghosting, zero double-edge blur
+    // Draw 100% crisp single master frame — zero ghosting, zero double-edge blur
     ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
+
+    // On portrait mobile screens, softly feather top and bottom edges into the deep #050308 background
+    if (isPortrait) {
+      const fadeH = Math.min(32, Math.round(drawH * 0.16));
+      if (fadeH > 2) {
+        const topGrad = ctx.createLinearGradient(0, offsetY, 0, offsetY + fadeH);
+        topGrad.addColorStop(0, '#050308');
+        topGrad.addColorStop(1, 'rgba(5, 3, 8, 0)');
+        ctx.fillStyle = topGrad;
+        ctx.fillRect(offsetX, offsetY, drawW, fadeH);
+
+        const btmGrad = ctx.createLinearGradient(0, offsetY + drawH - fadeH, 0, offsetY + drawH);
+        btmGrad.addColorStop(0, 'rgba(5, 3, 8, 0)');
+        btmGrad.addColorStop(1, '#050308');
+        ctx.fillStyle = btmGrad;
+        ctx.fillRect(offsetX, offsetY + drawH - fadeH, drawW, fadeH);
+      }
+    }
 
     lastRenderedPos = targetIdx;
   }
@@ -188,7 +206,14 @@
         .then((res) => (res.ok ? res.blob() : null))
         .then((blob) => {
           if (!blob) return null;
-          // Decode full uncompressed 4K master bitmap directly — zero downsampling blur!
+          // Decode device-sized bitmap to keep memory light and fluid on mobile while keeping 4K native on desktop
+          if (decodeTargetW < 3840 && typeof createImageBitmap === 'function') {
+            return createImageBitmap(blob, {
+              resizeWidth: decodeTargetW,
+              resizeHeight: decodeTargetH,
+              resizeQuality: 'high',
+            }).catch(() => createImageBitmap(blob));
+          }
           return createImageBitmap(blob);
         })
         .then((bm) => {
