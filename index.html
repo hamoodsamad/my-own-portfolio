@@ -327,7 +327,7 @@
       </div>
     </section>
 
-    <!-- Section 4: Dedicated Projects Section -->
+    <!-- Section 4: Dedicated Projects Section (3D Revolving Circular Carousel) -->
     <section class="projects" id="projects">
       <div class="container">
         <div class="projects-head">
@@ -336,10 +336,61 @@
             <h2 class="section-title">Featured Projects</h2>
           </div>
 
-          <div class="projects-filters" id="project-filters" role="tablist" aria-label="Filter projects by category"></div>
+          <!-- Category Filter Dropdown Trigger & Menu -->
+          <div class="projects-filter-box" id="projects-filter-box">
+            <button
+              type="button"
+              class="category-select-btn"
+              id="category-select-btn"
+              aria-expanded="false"
+              aria-haspopup="true"
+              aria-label="Filter projects by category"
+            >
+              <span class="cat-btn-icon" aria-hidden="true">
+                <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M3 5h14M6 10h8m-5 5h2" />
+                </svg>
+              </span>
+              <span class="cat-btn-label" id="cat-btn-label">Category: All</span>
+              <span class="cat-btn-chevron" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M4 6l4 4 4-4" />
+                </svg>
+              </span>
+            </button>
+
+            <div class="category-menu" id="category-menu" hidden role="menu" aria-label="Project categories"></div>
+          </div>
         </div>
 
-        <div class="projects-grid" id="projects-grid"></div>
+        <!-- 3D Revolving Circular Carousel Track -->
+        <div class="carousel-container" id="projects-carousel-container">
+          <button type="button" class="carousel-nav-btn carousel-nav-btn--prev" id="carousel-prev-btn" aria-label="Previous project">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+            </svg>
+          </button>
+
+          <div class="carousel-stage" id="carousel-stage">
+            <div class="carousel-cylinder" id="carousel-cylinder">
+              <!-- Dynamic 3D cards injected here -->
+            </div>
+          </div>
+
+          <button type="button" class="carousel-nav-btn carousel-nav-btn--next" id="carousel-next-btn" aria-label="Next project">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="carousel-footer">
+          <div class="carousel-dots" id="carousel-dots" role="tablist" aria-label="Project carousel indicators"></div>
+          <p class="carousel-drag-hint">
+            <span class="drag-icon" aria-hidden="true">⇄</span>
+            <span>Drag or swipe horizontally to revolve projects in 360°</span>
+          </p>
+        </div>
       </div>
     </section>
 

@@ -340,6 +340,22 @@ button {
   text-decoration: underline;
 }
 
+.flex-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.link-arrow-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
+  stroke: currentColor;
+}
+
 .form-stack {
   display: flex;
   flex-direction: column;

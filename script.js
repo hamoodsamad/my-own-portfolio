@@ -60,18 +60,20 @@
     const physicalW = Math.round(width * canvasScale);
     const physicalH = Math.round(height * canvasScale);
 
+    const isPortrait = height > width;
+
     // Device-tuned bitmap sizing:
-    // Full 4K (3840x2160) for 4K / 32-inch displays and large high-DPI screens
-    // 2560x1440 for QHD / 1440p displays
-    // 1920x1080 for standard 1080p laptops
-    // 1280x720 / 960x540 for tablets & mobile phones
-    if (physicalW >= 2560 || physicalH >= 1440) {
+    // Full 4K (3840x2160) for 4K / 32-inch desktop monitors (physical width >= 2560)
+    // 2560x1440 for QHD desktop displays and large tablets
+    // 1920x1080 for standard laptops and high-density mobile phones (ultra-sharp, zero stutter)
+    // 1280x720 for compact mobile phones (instant, lightweight 60-120fps)
+    if (!isPortrait && (physicalW >= 2560 || width >= 1920)) {
       decodeTargetW = 3840;
       decodeTargetH = 2160;
-    } else if (physicalW >= 1440 || physicalH >= 900) {
+    } else if (!isPortrait && (physicalW >= 1440 || width >= 1200)) {
       decodeTargetW = 2560;
       decodeTargetH = 1440;
-    } else if (physicalW >= 960) {
+    } else if (width >= 768 || physicalW >= 720 || physicalH >= 1280) {
       decodeTargetW = 1920;
       decodeTargetH = 1080;
     } else {
@@ -372,15 +374,209 @@
   }
 
   /* =========================================
-     4. Dynamic Projects Section + Filtering
+     4. Dynamic 3D Revolving Circular Projects Engine + Category Dropdown
      ========================================= */
-  const projectsGrid = document.getElementById('projects-grid');
-  const projectFilters = document.getElementById('project-filters');
+  const categorySelectBtn = document.getElementById('category-select-btn');
+  const categoryMenu = document.getElementById('category-menu');
+  const catBtnLabel = document.getElementById('cat-btn-label');
+
+  const carouselStage = document.getElementById('carousel-stage');
+  const carouselCylinder = document.getElementById('carousel-cylinder');
+  const carouselPrevBtn = document.getElementById('carousel-prev-btn');
+  const carouselNextBtn = document.getElementById('carousel-next-btn');
+  const carouselDots = document.getElementById('carousel-dots');
+
   let cachedProjects = store ? store.getProjects() : [];
   let activeCategory = 'ALL';
 
+  // 3D Cylinder Carousel physics & animation state
+  let carouselItems = [];
+  let currentAngle = 0;
+  let targetAngle = 0;
+  let isDragging = false;
+  let dragStartX = 0;
+  let dragStartAngle = 0;
+  let isHovered = false;
+  let autoSpinSpeed = 0.05; // Gentle continuous 360° spin
+  let carouselRaf = null;
+  let slotCount = 1;
+  let slotAngleStep = 360;
+
+  function formatCategoryTitle(cat) {
+    if (cat === 'ALL') return 'All Categories';
+    return cat
+      .toLowerCase()
+      .split(' ')
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ');
+  }
+
+  function renderCategoryDropdown(categories, projects) {
+    if (!categoryMenu || !categorySelectBtn || !catBtnLabel) return;
+
+    categoryMenu.innerHTML = '';
+    categories.forEach((cat) => {
+      const count =
+        cat === 'ALL'
+          ? projects.length
+          : projects.filter(
+              (p) => String(p.category || '').trim().toUpperCase() === cat,
+            ).length;
+
+      const itemBtn = document.createElement('button');
+      itemBtn.type = 'button';
+      itemBtn.className = `category-item${cat === activeCategory ? ' is-active' : ''}`;
+      itemBtn.setAttribute('role', 'menuitem');
+
+      const nameSpan = document.createElement('span');
+      nameSpan.textContent = formatCategoryTitle(cat);
+
+      const countBadge = document.createElement('span');
+      countBadge.className = 'cat-count-badge';
+      countBadge.textContent = String(count);
+
+      itemBtn.appendChild(nameSpan);
+      itemBtn.appendChild(countBadge);
+
+      itemBtn.addEventListener('click', () => {
+        activeCategory = cat;
+        catBtnLabel.textContent = formatCategoryTitle(cat);
+        closeCategoryMenu();
+        renderProjects();
+      });
+
+      categoryMenu.appendChild(itemBtn);
+    });
+
+    catBtnLabel.textContent = formatCategoryTitle(activeCategory);
+  }
+
+  function toggleCategoryMenu() {
+    if (!categoryMenu || !categorySelectBtn) return;
+    const isExpanded = categorySelectBtn.getAttribute('aria-expanded') === 'true';
+    if (isExpanded) {
+      closeCategoryMenu();
+    } else {
+      openCategoryMenu();
+    }
+  }
+
+  function openCategoryMenu() {
+    if (!categoryMenu || !categorySelectBtn) return;
+    categorySelectBtn.setAttribute('aria-expanded', 'true');
+    categoryMenu.hidden = false;
+  }
+
+  function closeCategoryMenu() {
+    if (!categoryMenu || !categorySelectBtn) return;
+    categorySelectBtn.setAttribute('aria-expanded', 'false');
+    categoryMenu.hidden = true;
+  }
+
+  if (categorySelectBtn) {
+    categorySelectBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleCategoryMenu();
+    });
+  }
+
+  document.addEventListener('click', (e) => {
+    if (
+      categoryMenu &&
+      !categoryMenu.hidden &&
+      !categoryMenu.contains(e.target) &&
+      !categorySelectBtn.contains(e.target)
+    ) {
+      closeCategoryMenu();
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && categoryMenu && !categoryMenu.hidden) {
+      closeCategoryMenu();
+    }
+  });
+
+  function updateCarouselPhysics() {
+    if (!carouselCylinder || carouselItems.length === 0) return;
+
+    if (!isDragging && !isHovered && slotCount > 1) {
+      targetAngle -= autoSpinSpeed;
+    }
+
+    // Smooth elastic lerp towards target angle
+    const diff = targetAngle - currentAngle;
+    currentAngle += diff * 0.1;
+
+    carouselCylinder.style.transform = `rotateY(${currentAngle}deg)`;
+
+    const halfStep = slotAngleStep / 2;
+    let closestIndex = 0;
+    let minAngularDist = 999;
+
+    carouselItems.forEach((item, idx) => {
+      // Calculate normalized angle relative to viewer (-180 to +180)
+      const rawTheta = (item.baseAngle + currentAngle) % 360;
+      const theta = ((rawTheta + 540) % 360) - 180;
+      const absTheta = Math.abs(theta);
+
+      const rad = (theta * Math.PI) / 180;
+      const cosVal = Math.cos(rad);
+
+      // Facing front: within half a step
+      const isFront = absTheta <= halfStep;
+      item.el.classList.toggle('is-active', isFront);
+
+      if (absTheta < minAngularDist) {
+        minAngularDist = absTheta;
+        closestIndex = item.projectIndex;
+      }
+
+      // Smooth depth perspective: front card full opacity, back cards curve gracefully into depth
+      const depthOpacity = Math.max(0.35, Math.min(1, 0.4 + 0.6 * cosVal));
+      const depthBrightness = Math.max(0.42, Math.min(1, 0.45 + 0.55 * cosVal));
+
+      item.el.style.opacity = String(depthOpacity);
+      item.el.style.filter = `brightness(${depthBrightness.toFixed(2)})`;
+      item.el.style.pointerEvents = isFront ? 'auto' : 'none';
+    });
+
+    // Update pagination dots
+    if (carouselDots) {
+      const dots = carouselDots.querySelectorAll('.carousel-dot');
+      dots.forEach((dot, dIdx) => {
+        dot.classList.toggle('is-active', dIdx === closestIndex);
+      });
+    }
+
+    carouselRaf = requestAnimationFrame(updateCarouselPhysics);
+  }
+
+  function startCarouselLoop() {
+    if (carouselRaf === null) {
+      carouselRaf = requestAnimationFrame(updateCarouselPhysics);
+    }
+  }
+
+  function stopCarouselLoop() {
+    if (carouselRaf !== null) {
+      cancelAnimationFrame(carouselRaf);
+      carouselRaf = null;
+    }
+  }
+
+  function rotateToProjectIndex(targetIdx) {
+    if (slotCount <= 1) return;
+    const item = carouselItems.find((it) => it.projectIndex === targetIdx);
+    if (!item) return;
+
+    const rawTheta = (item.baseAngle + targetAngle) % 360;
+    const theta = ((rawTheta + 540) % 360) - 180;
+    targetAngle -= theta;
+  }
+
   function renderProjects(listOverride) {
-    if (!store || !projectsGrid || !projectFilters) return;
+    if (!store || !carouselCylinder) return;
     if (Array.isArray(listOverride)) {
       cachedProjects = listOverride;
     }
@@ -396,20 +592,7 @@
       activeCategory = 'ALL';
     }
 
-    projectFilters.innerHTML = '';
-    categories.forEach((cat) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = `filter-pill${cat === activeCategory ? ' is-active' : ''}`;
-      btn.textContent = cat === 'ALL' ? 'All' : cat;
-      btn.setAttribute('role', 'tab');
-      btn.setAttribute('aria-selected', String(cat === activeCategory));
-      btn.addEventListener('click', () => {
-        activeCategory = cat;
-        renderProjects();
-      });
-      projectFilters.appendChild(btn);
-    });
+    renderCategoryDropdown(categories, projects);
 
     const visible =
       activeCategory === 'ALL'
@@ -418,19 +601,60 @@
             (p) => String(p.category || '').trim().toUpperCase() === activeCategory,
           );
 
-    projectsGrid.innerHTML = '';
+    stopCarouselLoop();
+    carouselCylinder.innerHTML = '';
+    carouselItems = [];
 
     if (visible.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'projects-empty';
       empty.textContent = 'No projects published in this category yet.';
-      projectsGrid.appendChild(empty);
+      carouselCylinder.appendChild(empty);
+      if (carouselDots) carouselDots.innerHTML = '';
       return;
     }
 
-    visible.forEach((proj, idx) => {
+    // Determine circular slot repetition so the circle is rich and continuous (min 4 slots for 3D orbit)
+    let slots = [];
+    if (visible.length >= 4) {
+      slots = visible.map((p, idx) => ({ project: p, projectIndex: idx }));
+    } else if (visible.length === 3) {
+      slots = [
+        ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
+        ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
+      ];
+    } else if (visible.length === 2) {
+      slots = [
+        ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
+        ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
+        ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
+      ];
+    } else {
+      slots = [{ project: visible[0], projectIndex: 0 }];
+    }
+
+    slotCount = slots.length;
+    slotAngleStep = 360 / slotCount;
+
+    // Radius calculation for 3D cylinder
+    const isMobile = window.innerWidth <= 600;
+    const isTablet = window.innerWidth <= 768;
+    const cardWidth = isMobile ? 260 : isTablet ? 300 : 340;
+
+    let radius = 0;
+    if (slotCount >= 3) {
+      const radPerSlot = (Math.PI / slotCount);
+      const computedR = (cardWidth / 2) / Math.tan(radPerSlot);
+      radius = Math.max(isMobile ? 210 : 280, Math.round(computedR + (isMobile ? 20 : 40)));
+    }
+
+    slots.forEach((slot, sIdx) => {
+      const baseAngle = sIdx * slotAngleStep;
+      const proj = slot.project;
+
       const card = document.createElement('article');
-      card.className = 'project-card';
+      card.className = 'carousel-card';
+      card.style.transform = `rotateY(${baseAngle}deg) translateZ(${radius}px)`;
 
       const thumb = document.createElement('div');
       thumb.className = 'project-thumb';
@@ -450,7 +674,7 @@
 
       const num = document.createElement('span');
       num.className = 'project-index';
-      num.textContent = `#${String(idx + 1).padStart(2, '0')}`;
+      num.textContent = `#${String(slot.projectIndex + 1).padStart(2, '0')}`;
       thumb.appendChild(num);
 
       const body = document.createElement('div');
@@ -490,15 +714,102 @@
       body.appendChild(footer);
       card.appendChild(thumb);
       card.appendChild(body);
-      projectsGrid.appendChild(card);
+
+      // Clicking a card rotates it directly to the front
+      card.addEventListener('click', (e) => {
+        if (card.classList.contains('is-active')) return;
+        rotateToProjectIndex(slot.projectIndex);
+      });
+
+      carouselCylinder.appendChild(card);
+      carouselItems.push({
+        el: card,
+        baseAngle,
+        projectIndex: slot.projectIndex,
+      });
     });
 
+    // Render pagination dots for each unique visible project
+    if (carouselDots) {
+      carouselDots.innerHTML = '';
+      visible.forEach((_, vIdx) => {
+        const dot = document.createElement('button');
+        dot.type = 'button';
+        dot.className = `carousel-dot${vIdx === 0 ? ' is-active' : ''}`;
+        dot.setAttribute('role', 'tab');
+        dot.setAttribute('aria-label', `Go to project ${vIdx + 1}`);
+        dot.addEventListener('click', () => {
+          rotateToProjectIndex(vIdx);
+        });
+        carouselDots.appendChild(dot);
+      });
+    }
+
+    startCarouselLoop();
     updateLayoutCaches();
     onNativeScroll();
   }
 
+  // Prev / Next Button Controls
+  if (carouselPrevBtn) {
+    carouselPrevBtn.addEventListener('click', () => {
+      targetAngle += slotAngleStep;
+    });
+  }
+
+  if (carouselNextBtn) {
+    carouselNextBtn.addEventListener('click', () => {
+      targetAngle -= slotAngleStep;
+    });
+  }
+
+  // Pointer Drag & Touch Swipe Controls for 360° Circular Rotation
+  if (carouselStage) {
+    carouselStage.addEventListener('pointerenter', () => {
+      isHovered = true;
+    });
+
+    carouselStage.addEventListener('pointerleave', () => {
+      isHovered = false;
+      if (isDragging) {
+        isDragging = false;
+        carouselStage.classList.remove('is-dragging');
+        targetAngle = Math.round(targetAngle / slotAngleStep) * slotAngleStep;
+      }
+    });
+
+    carouselStage.addEventListener('pointerdown', (e) => {
+      if (slotCount <= 1) return;
+      isDragging = true;
+      dragStartX = e.clientX;
+      dragStartAngle = targetAngle;
+      carouselStage.classList.add('is-dragging');
+    });
+
+    window.addEventListener('pointermove', (e) => {
+      if (!isDragging) return;
+      const deltaX = e.clientX - dragStartX;
+      targetAngle = dragStartAngle + deltaX * 0.42;
+    });
+
+    window.addEventListener('pointerup', () => {
+      if (!isDragging) return;
+      isDragging = false;
+      if (carouselStage) carouselStage.classList.remove('is-dragging');
+      // Snap to closest slot
+      targetAngle = Math.round(targetAngle / slotAngleStep) * slotAngleStep;
+    });
+
+    window.addEventListener('pointercancel', () => {
+      if (!isDragging) return;
+      isDragging = false;
+      if (carouselStage) carouselStage.classList.remove('is-dragging');
+      targetAngle = Math.round(targetAngle / slotAngleStep) * slotAngleStep;
+    });
+  }
+
   /* =========================================
-     5. Contact Inquiry Modal + Toasts + Admin Lock
+     5. Contact Inquiry Modal + Toasts + Admin Lock + Phone Copy
      ========================================= */
   const modal = document.getElementById('contact-modal');
   const modalClose = document.getElementById('modal-close');
@@ -612,6 +923,52 @@
 
   // Hidden Admin Lock tucked behind bottom (footer) HS logo only
   bindLogoAdminToggle('footer-logo-wrap', 'admin-lock-trigger', 'footer-admin-link');
+
+  // Desktop / Laptop Only: Phone Number Copy to Clipboard with Toast Feedback
+  const phoneCard = document.querySelector('[data-profile-tel="phone"]');
+  if (phoneCard) {
+    phoneCard.addEventListener('click', (e) => {
+      const isMobile =
+        /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+        ('ontouchstart' in window && window.innerWidth <= 768);
+
+      if (!isMobile) {
+        // Laptop / Desktop: copy phone number to clipboard instantly
+        e.preventDefault();
+        const phoneValEl = phoneCard.querySelector('[data-profile="phone"]');
+        const rawPhone = phoneValEl ? phoneValEl.textContent.trim() : '+92 343 6956890';
+
+        const notifySuccess = () => {
+          showToast(`Phone number copied to clipboard: ${rawPhone}`);
+          phoneCard.classList.add('is-copied');
+          setTimeout(() => phoneCard.classList.remove('is-copied'), 2200);
+        };
+
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          navigator.clipboard.writeText(rawPhone).then(notifySuccess, () => {
+            fallbackCopy(rawPhone);
+            notifySuccess();
+          });
+        } else {
+          fallbackCopy(rawPhone);
+          notifySuccess();
+        }
+      }
+      // On mobile / phones: Native tel: protocol opens the phone dialer naturally!
+    });
+  }
+
+  function fallbackCopy(text) {
+    const temp = document.createElement('textarea');
+    temp.value = text;
+    temp.setAttribute('readonly', '');
+    temp.style.position = 'absolute';
+    temp.style.left = '-9999px';
+    document.body.appendChild(temp);
+    temp.select();
+    document.execCommand('copy');
+    temp.remove();
+  }
 
   let cloudSyncInFlight = false;
   async function syncFromCloud() {
