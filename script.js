@@ -127,13 +127,10 @@
 
   function renderFrame(position, force = false) {
     const clamped = Math.min(FRAME_COUNT - 1, Math.max(0, position));
-    if (!force && Math.abs(clamped - lastRenderedPos) < 0.002) return;
+    const targetIdx = Math.round(clamped);
+    if (!force && targetIdx === lastRenderedPos) return;
 
-    const baseIdx = Math.floor(clamped);
-    const nextIdx = Math.min(FRAME_COUNT - 1, baseIdx + 1);
-    const frac = clamped - baseIdx;
-
-    const resolvedBase = findNearestFrame(baseIdx);
+    const resolvedBase = findNearestFrame(targetIdx);
     if (resolvedBase === -1) return;
 
     const baseImg = frames[resolvedBase];
@@ -146,22 +143,10 @@
     ctx.globalAlpha = 1;
     ctx.fillStyle = '#050308';
     ctx.fillRect(0, 0, width, height);
+    // Draw 100% crisp single master 4K frame — zero ghosting, zero double-edge blur
     ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
 
-    // Sub-frame continuous blending between pinned GPU frames -> silky 60/120fps motion
-    if (
-      resolvedBase === baseIdx &&
-      nextIdx !== baseIdx &&
-      frac > 0.02 &&
-      frac < 0.98 &&
-      frames[nextIdx]
-    ) {
-      ctx.globalAlpha = frac;
-      ctx.drawImage(frames[nextIdx], offsetX, offsetY, drawW, drawH);
-      ctx.globalAlpha = 1;
-    }
-
-    lastRenderedPos = clamped;
+    lastRenderedPos = targetIdx;
   }
 
   function tick(timestamp) {
@@ -203,13 +188,7 @@
         .then((res) => (res.ok ? res.blob() : null))
         .then((blob) => {
           if (!blob) return null;
-          if (decodeTargetW < 3840) {
-            return createImageBitmap(blob, {
-              resizeWidth: decodeTargetW,
-              resizeHeight: decodeTargetH,
-              resizeQuality: 'high',
-            }).catch(() => createImageBitmap(blob));
-          }
+          // Decode full uncompressed 4K master bitmap directly — zero downsampling blur!
           return createImageBitmap(blob);
         })
         .then((bm) => {
@@ -397,7 +376,7 @@
   let dragStartX = 0;
   let dragStartAngle = 0;
   let isHovered = false;
-  let autoSpinSpeed = 0.05; // Gentle continuous 360° spin
+  let autoSpinSpeed = 0.16; // Naturally brisk, smooth 360° spin
   let carouselRaf = null;
   let slotCount = 1;
   let slotAngleStep = 360;
@@ -506,7 +485,7 @@
 
     // Smooth elastic lerp towards target angle
     const diff = targetAngle - currentAngle;
-    currentAngle += diff * 0.1;
+    currentAngle += diff * 0.14;
 
     carouselCylinder.style.transform = `rotateY(${currentAngle}deg)`;
 
@@ -636,16 +615,16 @@
     slotCount = slots.length;
     slotAngleStep = 360 / slotCount;
 
-    // Radius calculation for 3D cylinder
+    // Radius calculation for 3D cylinder (compact normal size)
     const isMobile = window.innerWidth <= 600;
     const isTablet = window.innerWidth <= 768;
-    const cardWidth = isMobile ? 260 : isTablet ? 300 : 340;
+    const cardWidth = isMobile ? 210 : isTablet ? 240 : 270;
 
     let radius = 0;
     if (slotCount >= 3) {
       const radPerSlot = (Math.PI / slotCount);
       const computedR = (cardWidth / 2) / Math.tan(radPerSlot);
-      radius = Math.max(isMobile ? 210 : 280, Math.round(computedR + (isMobile ? 20 : 40)));
+      radius = Math.max(isMobile ? 180 : 220, Math.round(computedR + (isMobile ? 15 : 25)));
     }
 
     slots.forEach((slot, sIdx) => {

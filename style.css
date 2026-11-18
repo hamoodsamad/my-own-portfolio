@@ -1434,23 +1434,23 @@ button {
   color: rgba(255, 255, 255, 0.9);
 }
 
-/* 3D Revolving Circular Carousel Track */
+/* 3D Revolving Circular Carousel Track (Compact & Naturally Sized) */
 .carousel-container {
   position: relative;
   width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-top: clamp(20px, 3vh, 36px);
+  margin-top: clamp(16px, 2.5vh, 28px);
   padding-inline: clamp(10px, 3vw, 40px);
 }
 
 .carousel-stage {
   position: relative;
   width: 100%;
-  max-width: 1200px;
-  height: 530px;
-  perspective: 1400px;
+  max-width: 1100px;
+  height: 420px;
+  perspective: 1250px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1466,8 +1466,8 @@ button {
 
 .carousel-cylinder {
   position: relative;
-  width: 340px;
-  height: 460px;
+  width: 270px;
+  height: 360px;
   transform-style: preserve-3d;
   will-change: transform;
 }
@@ -1475,34 +1475,137 @@ button {
 .carousel-card {
   position: absolute;
   inset: 0;
-  width: 340px;
-  height: 460px;
-  border-radius: 22px;
-  background: rgba(18, 14, 26, 0.88);
+  width: 270px;
+  height: 360px;
+  border-radius: 18px;
+  background: rgba(18, 14, 26, 0.9);
   backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
   overflow: hidden;
   display: flex;
   flex-direction: column;
   transform-style: preserve-3d;
-  transition: opacity 0.4s ease, filter 0.4s ease, border-color 0.4s ease, box-shadow 0.4s ease;
+  transition: opacity 0.35s ease, filter 0.35s ease, border-color 0.35s ease, box-shadow 0.35s ease;
   backface-visibility: visible;
   cursor: pointer;
 }
 
 .carousel-card.is-active {
   border-color: rgba(255, 87, 25, 0.7);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.7), 0 0 35px rgba(255, 87, 25, 0.28);
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.65), 0 0 28px rgba(255, 87, 25, 0.25);
   z-index: 20;
+}
+
+.carousel-card .project-thumb {
+  position: relative;
+  aspect-ratio: 16 / 9.5;
+  width: 100%;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.carousel-card .project-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.4s ease;
+}
+
+.carousel-card:hover .project-thumb img {
+  transform: scale(1.05);
+}
+
+.carousel-card .project-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #ffffff;
+  background: rgba(10, 10, 14, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.carousel-card .project-index {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--accent);
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: rgba(10, 10, 14, 0.82);
+}
+
+.carousel-card .project-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 6px;
+  padding: 12px 14px;
+}
+
+.carousel-card .project-title {
+  font-size: 0.96rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.25;
+  color: #ffffff;
+}
+
+.carousel-card .project-desc {
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  flex: 1;
+}
+
+.carousel-card .project-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 8px;
+  margin-top: auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.carousel-card .project-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--accent);
+  transition: color 0.2s ease, transform 0.2s ease;
+}
+
+.carousel-card .project-link:hover {
+  color: #ffffff;
+  transform: translateX(2px);
+}
+
+.carousel-card .project-link--muted {
+  font-size: 0.72rem;
+  color: var(--text-muted);
 }
 
 .carousel-nav-btn {
   position: absolute;
   top: 50%;
   transform: translateY(-50%);
-  width: 48px;
-  height: 48px;
+  width: 42px;
+  height: 42px;
   border-radius: 50%;
   background: rgba(16, 12, 24, 0.85);
   border: 1px solid rgba(255, 255, 255, 0.16);
@@ -1518,16 +1621,16 @@ button {
 }
 
 .carousel-nav-btn svg {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
 }
 
 .carousel-nav-btn--prev {
-  left: clamp(4px, 1.5vw, 24px);
+  left: clamp(4px, 1.5vw, 20px);
 }
 
 .carousel-nav-btn--next {
-  right: clamp(4px, 1.5vw, 24px);
+  right: clamp(4px, 1.5vw, 20px);
 }
 
 .carousel-nav-btn:hover {
@@ -1542,8 +1645,8 @@ button {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  margin-top: 24px;
+  gap: 10px;
+  margin-top: 18px;
 }
 
 .carousel-dots {
@@ -1568,7 +1671,7 @@ button {
 }
 
 .carousel-dot.is-active {
-  width: 24px;
+  width: 22px;
   background: var(--accent);
 }
 
@@ -1576,7 +1679,7 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 0.78rem;
+  font-size: 0.74rem;
   color: var(--text-muted);
   letter-spacing: 0.02em;
 }
@@ -1605,40 +1708,56 @@ button {
 
 @media (max-width: 768px) {
   .carousel-stage {
-    height: 480px;
-    perspective: 1100px;
+    height: 370px;
+    perspective: 1000px;
   }
 
   .carousel-cylinder {
-    width: 300px;
-    height: 420px;
+    width: 240px;
+    height: 330px;
   }
 
   .carousel-card {
-    width: 300px;
-    height: 420px;
+    width: 240px;
+    height: 330px;
+  }
+
+  .carousel-card .project-body {
+    padding: 10px 12px;
   }
 }
 
 @media (max-width: 600px) {
   .carousel-stage {
-    height: 440px;
-    perspective: 900px;
+    height: 330px;
+    perspective: 850px;
   }
 
   .carousel-cylinder {
-    width: 260px;
-    height: 380px;
+    width: 210px;
+    height: 295px;
   }
 
   .carousel-card {
-    width: 260px;
-    height: 380px;
+    width: 210px;
+    height: 295px;
+  }
+
+  .carousel-card .project-body {
+    padding: 8px 10px;
+  }
+
+  .carousel-card .project-title {
+    font-size: 0.86rem;
+  }
+
+  .carousel-card .project-desc {
+    font-size: 0.7rem;
   }
 
   .carousel-nav-btn {
-    width: 38px;
-    height: 38px;
+    width: 34px;
+    height: 34px;
   }
 
   .category-menu {
