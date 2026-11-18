@@ -1,14 +1,15 @@
 (() => {
   /* =========================================
-     1. Zero-Stutter 48fps HD Scroll Canvas Engine
+     1. Zero-Stutter HD+ Scroll Canvas Engine
      ========================================= */
-  const FRAME_COUNT = 239;
-  const SMOOTHING = 9.5;
+  const FRAME_COUNT = 120;
+  const SMOOTHING = 8.5;
   const USE_BITMAP_PIPELINE =
     window.location.protocol !== 'file:' && typeof window.createImageBitmap === 'function';
-  const GPU_AHEAD = 32;
-  const GPU_BEHIND = 14;
-  const MAX_GPU_BITMAPS = 64;
+  const GPU_AHEAD = 16;
+  const GPU_BEHIND = 10;
+  const MAX_GPU_BITMAPS = 34;
+  const MAX_CONCURRENT_DECODES = 2;
 
   const canvas = document.getElementById('scroll-canvas');
   const ctx = canvas.getContext('2d', { alpha: false });
@@ -21,6 +22,7 @@
   let width = 0;
   let height = 0;
   let maxScrollCache = 1;
+  let activeDecodes = 0;
 
   let targetFrame = 0;
   let currentFrame = 0;
@@ -47,8 +49,11 @@
     updateScrollBounds();
 
     const rawDpr = window.devicePixelRatio || 1;
-    // Match native 1080p source crispness without wasteful 4K canvas fill-rate overhead
-    const maxScale = Math.max(1, Math.min(2, 1920 / Math.max(width, 1), 1080 / Math.max(height, 1) * 1.35));
+    // Match 1600x900 HD+ source crispness without wasteful 4K canvas fill-rate overhead
+    const maxScale = Math.max(
+      1,
+      Math.min(1.6, 1600 / Math.max(width, 1), (900 / Math.max(height, 1)) * 1.4),
+    );
     const scale = Math.min(rawDpr, maxScale);
 
     canvas.width = Math.max(1, Math.round(width * scale));
@@ -62,25 +67,44 @@
     renderFrame(Math.round(currentFrame), true);
   }
 
-  function drawCover(source) {
+  function drawCover(source, frameIndex) {
     const imgW = source.naturalWidth || source.width;
     const imgH = source.naturalHeight || source.height;
     if (!imgW || !imgH) return;
 
-    const scale = Math.max(width / imgW, height / imgH);
+    const coverScale = Math.max(width / imgW, height / imgH);
+    const containScale = Math.min(width / imgW, height / imgH);
+    const progress = frameIndex / Math.max(1, FRAME_COUNT - 1);
+
+    // Pull portrait slightly further back at start (tight close-up) -> natural balanced framing throughout
+    const pullBack = 0.78 + progress * 0.14;
+    const isPortrait = height > width;
+    const baseScale = isPortrait
+      ? coverScale * 0.68 + containScale * 0.24
+      : coverScale;
+    const scale = baseScale * pullBack;
+
     const drawW = imgW * scale;
     const drawH = imgH * scale;
     const offsetX = (width - drawW) * 0.5;
-    const offsetY = (height - drawH) * 0.5;
+    const offsetY = (height - drawH) * 0.48;
 
+    ctx.fillStyle = '#050308';
+    ctx.fillRect(0, 0, width, height);
     ctx.drawImage(source, offsetX, offsetY, drawW, drawH);
   }
 
   function evictDistantBitmaps(centerIndex) {
     if (bitmaps.size <= MAX_GPU_BITMAPS) return;
     const entries = Array.from(bitmaps.keys()).sort((a, b) => {
-      const distA = (a - centerIndex) * scrollDirection >= 0 ? Math.abs(a - centerIndex) * 0.65 : Math.abs(a - centerIndex);
-      const distB = (b - centerIndex) * scrollDirection >= 0 ? Math.abs(b - centerIndex) * 0.65 : Math.abs(b - centerIndex);
+      const distA =
+        (a - centerIndex) * scrollDirection >= 0
+          ? Math.abs(a - centerIndex) * 0.7
+          : Math.abs(a - centerIndex);
+      const distB =
+        (b - centerIndex) * scrollDirection >= 0
+          ? Math.abs(b - centerIndex) * 0.7
+          : Math.abs(b - centerIndex);
       return distB - distA;
     });
     while (bitmaps.size > MAX_GPU_BITMAPS && entries.length) {
@@ -92,37 +116,56 @@
     }
   }
 
-  function ensureBitmap(index) {
-    if (!USE_BITMAP_PIPELINE) return;
-    if (index < 0 || index >= FRAME_COUNT) return;
-    if (bitmaps.has(index) || decoding.has(index)) return;
-    const blob = blobs[index];
-    if (!blob) return;
+  function pickNextDecodeCandidate() {
+    const targetIdx = Math.round(targetFrame);
+    const currentIdx = Math.round(currentFrame);
 
-    decoding.add(index);
-    createImageBitmap(blob)
-      .then((bm) => {
-        decoding.delete(index);
-        bitmaps.set(index, bm);
-        const activeIdx = Math.round(currentFrame);
-        evictDistantBitmaps(activeIdx);
-        if (Math.abs(activeIdx - index) <= 1 || lastRenderedIndex === -1) {
-          renderFrame(activeIdx, true);
-        }
-      })
-      .catch(() => {
-        decoding.delete(index);
-      });
+    // Highest priority: exact target & current frames first
+    const priority = [currentIdx, targetIdx];
+    for (let offset = 1; offset <= GPU_AHEAD; offset++) {
+      priority.push(currentIdx + offset * scrollDirection);
+      if (offset <= GPU_BEHIND) {
+        priority.push(currentIdx - offset * scrollDirection);
+      }
+    }
+
+    for (const idx of priority) {
+      if (idx < 0 || idx >= FRAME_COUNT) continue;
+      if (blobs[idx] && !bitmaps.has(idx) && !decoding.has(idx)) {
+        return idx;
+      }
+    }
+    return -1;
   }
 
-  function primeWindow(centerIndex) {
+  function pumpDecodeQueue() {
     if (!USE_BITMAP_PIPELINE) return;
-    ensureBitmap(centerIndex);
-    for (let offset = 1; offset <= GPU_AHEAD; offset++) {
-      ensureBitmap(centerIndex + offset * scrollDirection);
-      if (offset <= GPU_BEHIND) {
-        ensureBitmap(centerIndex - offset * scrollDirection);
-      }
+    while (activeDecodes < MAX_CONCURRENT_DECODES) {
+      const idx = pickNextDecodeCandidate();
+      if (idx === -1) break;
+
+      decoding.add(idx);
+      activeDecodes += 1;
+
+      createImageBitmap(blobs[idx])
+        .then((bm) => {
+          decoding.delete(idx);
+          activeDecodes = Math.max(0, activeDecodes - 1);
+          bitmaps.set(idx, bm);
+
+          const activeIdx = Math.round(currentFrame);
+          evictDistantBitmaps(activeIdx);
+
+          if (Math.abs(activeIdx - idx) <= 1 || lastRenderedIndex === -1) {
+            renderFrame(activeIdx, true);
+          }
+          pumpDecodeQueue();
+        })
+        .catch(() => {
+          decoding.delete(idx);
+          activeDecodes = Math.max(0, activeDecodes - 1);
+          pumpDecodeQueue();
+        });
     }
   }
 
@@ -156,12 +199,12 @@
     const clamped = Math.min(FRAME_COUNT - 1, Math.max(0, index));
     if (!force && clamped === lastRenderedIndex) return;
 
-    primeWindow(clamped);
+    pumpDecodeQueue();
 
     const found = findNearestSource(clamped);
     if (!found) return;
 
-    drawCover(found.src);
+    drawCover(found.src, found.idx);
     lastRenderedIndex = found.idx;
   }
 
@@ -170,7 +213,7 @@
     lastTimestamp = timestamp;
 
     const delta = targetFrame - currentFrame;
-    if (Math.abs(delta) < 0.02) {
+    if (Math.abs(delta) < 0.025) {
       currentFrame = targetFrame;
       renderFrame(Math.round(currentFrame));
       rafId = null;
@@ -209,7 +252,7 @@
         if (!blob) return;
         blobs[index] = blob;
         if (Math.abs(Math.round(currentFrame) - index) <= GPU_AHEAD) {
-          ensureBitmap(index);
+          pumpDecodeQueue();
         }
       })
       .catch(() => {});
