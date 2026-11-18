@@ -1,42 +1,39 @@
 (() => {
   /* =========================================
-     1. Zero-Stutter HD+ Scroll Canvas Engine
+     1. Liquid-Smooth Zero-Freeze Scroll Canvas Engine
      ========================================= */
   const FRAME_COUNT = 120;
-  const SMOOTHING = 8.5;
-  const USE_BITMAP_PIPELINE =
+  const SMOOTHING = 6.5;
+  const USE_BITMAP =
     window.location.protocol !== 'file:' && typeof window.createImageBitmap === 'function';
-  const GPU_AHEAD = 16;
-  const GPU_BEHIND = 10;
-  const MAX_GPU_BITMAPS = 34;
-  const MAX_CONCURRENT_DECODES = 2;
 
   const canvas = document.getElementById('scroll-canvas');
   const ctx = canvas.getContext('2d', { alpha: false });
 
-  const blobs = new Array(FRAME_COUNT).fill(null);
-  const bitmaps = new Map();
-  const decoding = new Set();
-  const fallbackImages = new Array(FRAME_COUNT).fill(null);
+  // All 120 frames permanently pinned once decoded — ZERO eviction, ZERO decode during scroll
+  const frames = new Array(FRAME_COUNT).fill(null);
 
   let width = 0;
   let height = 0;
   let maxScrollCache = 1;
-  let activeDecodes = 0;
+  let cachedSectionOffsets = [];
 
   let targetFrame = 0;
   let currentFrame = 0;
-  let scrollDirection = 1;
-  let lastRenderedIndex = -1;
+  let lastRenderedPos = -1;
   let rafId = null;
   let lastTimestamp = 0;
 
   function frameSrc(index) {
-    return `./frames/frame-${String(index + 1).padStart(3, '0')}.webp`;
+    return `./frames/frame-${String(index + 1).padStart(3, '0')}.jpg`;
   }
 
-  function updateScrollBounds() {
+  function updateLayoutCaches() {
     maxScrollCache = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+    cachedSectionOffsets = trackedSections.map((sec) => ({
+      id: sec.id,
+      top: sec.offsetTop,
+    }));
   }
 
   function getScrollProgress() {
@@ -46,13 +43,13 @@
   function resize() {
     width = window.innerWidth;
     height = window.innerHeight;
-    updateScrollBounds();
+    updateLayoutCaches();
 
     const rawDpr = window.devicePixelRatio || 1;
-    // Match 1600x900 HD+ source crispness without wasteful 4K canvas fill-rate overhead
+    // Cap canvas backing size cleanly for blazing-fast GPU fill-rate on all devices
     const maxScale = Math.max(
       1,
-      Math.min(1.6, 1600 / Math.max(width, 1), (900 / Math.max(height, 1)) * 1.4),
+      Math.min(1.35, 1440 / Math.max(width, 1), (810 / Math.max(height, 1)) * 1.4),
     );
     const scale = Math.min(rawDpr, maxScale);
 
@@ -63,20 +60,16 @@
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
-    lastRenderedIndex = -1;
-    renderFrame(Math.round(currentFrame), true);
+    lastRenderedPos = -1;
+    renderFrame(currentFrame, true);
   }
 
-  function drawCover(source, frameIndex) {
-    const imgW = source.naturalWidth || source.width;
-    const imgH = source.naturalHeight || source.height;
-    if (!imgW || !imgH) return;
-
+  function computeDrawRect(imgW, imgH, framePos) {
     const coverScale = Math.max(width / imgW, height / imgH);
     const containScale = Math.min(width / imgW, height / imgH);
-    const progress = frameIndex / Math.max(1, FRAME_COUNT - 1);
+    const progress = framePos / Math.max(1, FRAME_COUNT - 1);
 
-    // Pull portrait slightly further back at start (tight close-up) -> natural balanced framing throughout
+    // Pull portrait slightly further back at top (tight close-up) -> natural balanced framing throughout
     const pullBack = 0.78 + progress * 0.14;
     const isPortrait = height > width;
     const baseScale = isPortrait
@@ -89,123 +82,55 @@
     const offsetX = (width - drawW) * 0.5;
     const offsetY = (height - drawH) * 0.48;
 
-    ctx.fillStyle = '#050308';
-    ctx.fillRect(0, 0, width, height);
-    ctx.drawImage(source, offsetX, offsetY, drawW, drawH);
+    return { offsetX, offsetY, drawW, drawH };
   }
 
-  function evictDistantBitmaps(centerIndex) {
-    if (bitmaps.size <= MAX_GPU_BITMAPS) return;
-    const entries = Array.from(bitmaps.keys()).sort((a, b) => {
-      const distA =
-        (a - centerIndex) * scrollDirection >= 0
-          ? Math.abs(a - centerIndex) * 0.7
-          : Math.abs(a - centerIndex);
-      const distB =
-        (b - centerIndex) * scrollDirection >= 0
-          ? Math.abs(b - centerIndex) * 0.7
-          : Math.abs(b - centerIndex);
-      return distB - distA;
-    });
-    while (bitmaps.size > MAX_GPU_BITMAPS && entries.length) {
-      const farIdx = entries.shift();
-      if (Math.abs(farIdx - centerIndex) <= GPU_BEHIND) break;
-      const bm = bitmaps.get(farIdx);
-      if (bm && typeof bm.close === 'function') bm.close();
-      bitmaps.delete(farIdx);
-    }
-  }
-
-  function pickNextDecodeCandidate() {
-    const targetIdx = Math.round(targetFrame);
-    const currentIdx = Math.round(currentFrame);
-
-    // Highest priority: exact target & current frames first
-    const priority = [currentIdx, targetIdx];
-    for (let offset = 1; offset <= GPU_AHEAD; offset++) {
-      priority.push(currentIdx + offset * scrollDirection);
-      if (offset <= GPU_BEHIND) {
-        priority.push(currentIdx - offset * scrollDirection);
-      }
-    }
-
-    for (const idx of priority) {
-      if (idx < 0 || idx >= FRAME_COUNT) continue;
-      if (blobs[idx] && !bitmaps.has(idx) && !decoding.has(idx)) {
-        return idx;
-      }
+  function findNearestFrame(index) {
+    if (frames[index]) return index;
+    for (let offset = 1; offset < FRAME_COUNT; offset++) {
+      if (index - offset >= 0 && frames[index - offset]) return index - offset;
+      if (index + offset < FRAME_COUNT && frames[index + offset]) return index + offset;
     }
     return -1;
   }
 
-  function pumpDecodeQueue() {
-    if (!USE_BITMAP_PIPELINE) return;
-    while (activeDecodes < MAX_CONCURRENT_DECODES) {
-      const idx = pickNextDecodeCandidate();
-      if (idx === -1) break;
+  function renderFrame(position, force = false) {
+    const clamped = Math.min(FRAME_COUNT - 1, Math.max(0, position));
+    if (!force && Math.abs(clamped - lastRenderedPos) < 0.002) return;
 
-      decoding.add(idx);
-      activeDecodes += 1;
+    const baseIdx = Math.floor(clamped);
+    const nextIdx = Math.min(FRAME_COUNT - 1, baseIdx + 1);
+    const frac = clamped - baseIdx;
 
-      createImageBitmap(blobs[idx])
-        .then((bm) => {
-          decoding.delete(idx);
-          activeDecodes = Math.max(0, activeDecodes - 1);
-          bitmaps.set(idx, bm);
+    const resolvedBase = findNearestFrame(baseIdx);
+    if (resolvedBase === -1) return;
 
-          const activeIdx = Math.round(currentFrame);
-          evictDistantBitmaps(activeIdx);
+    const baseImg = frames[resolvedBase];
+    const imgW = baseImg.naturalWidth || baseImg.width;
+    const imgH = baseImg.naturalHeight || baseImg.height;
+    if (!imgW || !imgH) return;
 
-          if (Math.abs(activeIdx - idx) <= 1 || lastRenderedIndex === -1) {
-            renderFrame(activeIdx, true);
-          }
-          pumpDecodeQueue();
-        })
-        .catch(() => {
-          decoding.delete(idx);
-          activeDecodes = Math.max(0, activeDecodes - 1);
-          pumpDecodeQueue();
-        });
-    }
-  }
+    const { offsetX, offsetY, drawW, drawH } = computeDrawRect(imgW, imgH, clamped);
 
-  function findNearestSource(index) {
-    if (USE_BITMAP_PIPELINE) {
-      if (bitmaps.has(index)) return { idx: index, src: bitmaps.get(index) };
-      for (let offset = 1; offset < FRAME_COUNT; offset++) {
-        if (index - offset >= 0 && bitmaps.has(index - offset)) {
-          return { idx: index - offset, src: bitmaps.get(index - offset) };
-        }
-        if (index + offset < FRAME_COUNT && bitmaps.has(index + offset)) {
-          return { idx: index + offset, src: bitmaps.get(index + offset) };
-        }
-      }
-      return null;
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#050308';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
+
+    // Sub-frame continuous crossfade between pinned GPU frames -> true 60/120fps liquid motion
+    if (
+      resolvedBase === baseIdx &&
+      nextIdx !== baseIdx &&
+      frac > 0.02 &&
+      frac < 0.98 &&
+      frames[nextIdx]
+    ) {
+      ctx.globalAlpha = frac;
+      ctx.drawImage(frames[nextIdx], offsetX, offsetY, drawW, drawH);
+      ctx.globalAlpha = 1;
     }
 
-    if (fallbackImages[index]) return { idx: index, src: fallbackImages[index] };
-    for (let offset = 1; offset < FRAME_COUNT; offset++) {
-      if (index - offset >= 0 && fallbackImages[index - offset]) {
-        return { idx: index - offset, src: fallbackImages[index - offset] };
-      }
-      if (index + offset < FRAME_COUNT && fallbackImages[index + offset]) {
-        return { idx: index + offset, src: fallbackImages[index + offset] };
-      }
-    }
-    return null;
-  }
-
-  function renderFrame(index, force = false) {
-    const clamped = Math.min(FRAME_COUNT - 1, Math.max(0, index));
-    if (!force && clamped === lastRenderedIndex) return;
-
-    pumpDecodeQueue();
-
-    const found = findNearestSource(clamped);
-    if (!found) return;
-
-    drawCover(found.src, found.idx);
-    lastRenderedIndex = found.idx;
+    lastRenderedPos = clamped;
   }
 
   function tick(timestamp) {
@@ -213,9 +138,9 @@
     lastTimestamp = timestamp;
 
     const delta = targetFrame - currentFrame;
-    if (Math.abs(delta) < 0.025) {
+    if (Math.abs(delta) < 0.004) {
       currentFrame = targetFrame;
-      renderFrame(Math.round(currentFrame));
+      renderFrame(currentFrame);
       rafId = null;
       lastTimestamp = 0;
       return;
@@ -223,7 +148,7 @@
 
     const factor = 1 - Math.exp(-SMOOTHING * dt);
     currentFrame += delta * factor;
-    renderFrame(Math.round(currentFrame));
+    renderFrame(currentFrame);
 
     rafId = requestAnimationFrame(tick);
   }
@@ -236,36 +161,33 @@
   }
 
   function onScroll() {
-    const nextTarget = getScrollProgress() * (FRAME_COUNT - 1);
-    if (Math.abs(nextTarget - targetFrame) > 0.05) {
-      scrollDirection = nextTarget >= targetFrame ? 1 : -1;
-    }
-    targetFrame = nextTarget;
+    targetFrame = getScrollProgress() * (FRAME_COUNT - 1);
     scheduleRender();
     updateHeaderAndNav();
   }
 
-  function fetchBlobFrame(index) {
-    return fetch(frameSrc(index))
-      .then((res) => (res.ok ? res.blob() : null))
-      .then((blob) => {
-        if (!blob) return;
-        blobs[index] = blob;
-        if (Math.abs(Math.round(currentFrame) - index) <= GPU_AHEAD) {
-          pumpDecodeQueue();
-        }
-      })
-      .catch(() => {});
-  }
+  function decodeFrame(index) {
+    if (USE_BITMAP) {
+      return fetch(frameSrc(index))
+        .then((res) => (res.ok ? res.blob() : null))
+        .then((blob) => (blob ? createImageBitmap(blob) : null))
+        .then((bm) => {
+          if (!bm) return;
+          frames[index] = bm;
+          if (Math.abs(currentFrame - index) < 2 || lastRenderedPos === -1) {
+            renderFrame(currentFrame, true);
+          }
+        })
+        .catch(() => {});
+    }
 
-  function loadFallbackImage(index) {
     return new Promise((resolve) => {
       const img = new Image();
       img.decoding = 'async';
       const done = () => {
-        fallbackImages[index] = img;
-        if (Math.abs(Math.round(currentFrame) - index) <= 1 || lastRenderedIndex === -1) {
-          renderFrame(Math.round(currentFrame), true);
+        frames[index] = img;
+        if (Math.abs(currentFrame - index) < 2 || lastRenderedPos === -1) {
+          renderFrame(currentFrame, true);
         }
         resolve();
       };
@@ -278,25 +200,29 @@
     });
   }
 
-  function preloadFrames() {
+  function preloadAllFrames() {
     const initialIndex = Math.round(currentFrame);
-    const loader = USE_BITMAP_PIPELINE ? fetchBlobFrame : loadFallbackImage;
-
-    // Prioritize frames near initial scroll position first, then expand outward
+    const seen = new Set([initialIndex]);
     const queue = [];
-    for (let offset = 1; offset < FRAME_COUNT; offset++) {
-      if (initialIndex + offset < FRAME_COUNT) queue.push(initialIndex + offset);
-      if (initialIndex - offset >= 0) queue.push(initialIndex - offset);
+
+    // Interleaved progressive order: every 4th frame first, then every 2nd, then remaining
+    for (const step of [4, 2, 1]) {
+      for (let i = 0; i < FRAME_COUNT; i += step) {
+        if (!seen.has(i)) {
+          seen.add(i);
+          queue.push(i);
+        }
+      }
     }
 
-    loader(initialIndex).then(() => {
-      const CONCURRENCY = 6;
+    decodeFrame(initialIndex).then(() => {
+      const CONCURRENCY = 4;
       let cursor = 0;
 
       function worker() {
         if (cursor >= queue.length) return;
         const idx = queue[cursor++];
-        loader(idx).then(worker);
+        decodeFrame(idx).then(worker);
       }
 
       for (let i = 0; i < CONCURRENCY; i++) {
@@ -316,22 +242,30 @@
     .map((id) => document.getElementById(id))
     .filter(Boolean);
 
+  let lastHeaderScrolled = false;
+  let lastActiveNavId = '';
+
   function updateHeaderAndNav() {
-    if (header) {
-      header.classList.toggle('is-scrolled', window.scrollY > 24);
+    const scrolled = window.scrollY > 24;
+    if (header && scrolled !== lastHeaderScrolled) {
+      lastHeaderScrolled = scrolled;
+      header.classList.toggle('is-scrolled', scrolled);
     }
 
-    const probe = window.scrollY + window.innerHeight * 0.35;
+    const probe = window.scrollY + height * 0.35;
     let activeId = 'home';
-    for (const sec of trackedSections) {
-      if (probe >= sec.offsetTop) {
-        activeId = sec.id;
+    for (let i = 0; i < cachedSectionOffsets.length; i++) {
+      if (probe >= cachedSectionOffsets[i].top) {
+        activeId = cachedSectionOffsets[i].id;
       }
     }
 
-    navLinks.forEach((link) => {
-      link.classList.toggle('is-active', link.dataset.nav === activeId);
-    });
+    if (activeId !== lastActiveNavId) {
+      lastActiveNavId = activeId;
+      navLinks.forEach((link) => {
+        link.classList.toggle('is-active', link.dataset.nav === activeId);
+      });
+    }
   }
 
   function closeMobileMenu() {
@@ -520,7 +454,7 @@
       projectsGrid.appendChild(card);
     });
 
-    updateScrollBounds();
+    updateLayoutCaches();
     onScroll();
   }
 
@@ -780,7 +714,7 @@
   currentFrame = targetFrame;
 
   resize();
-  preloadFrames();
+  preloadAllFrames();
   updateHeaderAndNav();
 
   window.addEventListener('scroll', onScroll, { passive: true });
@@ -788,7 +722,7 @@
   window.addEventListener(
     'load',
     () => {
-      updateScrollBounds();
+      updateLayoutCaches();
       onScroll();
     },
     { passive: true },
