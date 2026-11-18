@@ -1,4 +1,15 @@
+@font-face {
+  font-family: 'Pencerio-Hairline';
+  src: url('./fonts/Pencerio-Hairline.woff2') format('woff2'),
+       url('./fonts/Pencerio-Hairline.woff') format('woff'),
+       url('./fonts/Pencerio-Hairline.ttf') format('truetype');
+  font-weight: 100 900;
+  font-display: swap;
+  font-style: normal;
+}
+
 :root {
+  --font-script: 'Pencerio-Hairline', cursive;
   --bg: #07070a;
   --surface: rgba(16, 16, 22, 0.88);
   --surface-soft: rgba(255, 255, 255, 0.04);
@@ -54,12 +65,14 @@ button {
 }
 
 .eyebrow {
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-family: var(--font-script);
+  font-size: 1.45rem;
+  font-weight: 400;
+  line-height: 1.15;
+  letter-spacing: 0.01em;
   color: var(--accent);
-  margin-bottom: 8px;
+  -webkit-text-stroke: 0.4px rgba(255, 87, 25, 0.75);
+  margin-bottom: 6px;
 }
 
 /* =========================================
