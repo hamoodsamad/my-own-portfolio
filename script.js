@@ -445,7 +445,7 @@
 
     if (absDelta < 0.008) {
       currentFrame = targetFrame;
-      renderFrame(currentFrame);
+      renderFrame(currentFrame, needsRender);
       needsRender = false;
       rafId = null;
       lastTimestamp = 0;
