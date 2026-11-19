@@ -1,1419 +1,1671 @@
 (() => {
-  /* =========================================
-     1. High-Performance Adaptive Scroll Canvas Engine
-     ========================================= */
-  const FRAME_COUNT = 238;
-  const SCROLL_ANIM_PACE = 2.1;
-  const USE_BITMAP =
-    window.location.protocol !== 'file:' && typeof window.createImageBitmap === 'function';
+  'use strict';
 
-  const canvas = document.getElementById('scroll-canvas');
-  const ctx = canvas.getContext('2d', { alpha: false });
+  /* ==========================================================================
+     MODULE 1: SECURITY & SANITIZATION UTILITIES
+     Hardens application against Cross-Site Scripting (XSS) and protocol injection
+     ========================================================================== */
+  const Security = {
+    /**
+     * Escapes unsafe HTML characters to prevent XSS injection.
+     * @param {string|null|undefined} str
+     * @returns {string}
+     */
+    escapeHTML(str) {
+      if (str == null) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    },
 
-  // Intelligent sliding cache with resource release (.close())
-  const frames = new Array(FRAME_COUNT).fill(null);
-  const loadingSet = new Set();
-  const queue = [];
-  const CONCURRENCY = 8;
-  let activeWorkers = 0;
-  let maxCachedFrames = 238; // dynamically tuned: 140 on mobile, 185 on tablet, 238 on desktop
-  let cachedCount = 0;
-
-  let width = 0;
-  let height = 0;
-  let canvasScale = 1;
-  let decodeTargetW = 2560;
-  let decodeTargetH = 1440;
-  let cachedDrawRect = null;
-  let cachedTopGrad = null;
-  let cachedBtmGrad = null;
-  let needsRender = false;
-  let maxScrollCache = 1;
-  let cachedSectionOffsets = [];
-
-  let targetFrame = 0;
-  let currentFrame = 0;
-  let lastRenderedPos = -1;
-  let rafId = null;
-  let lastTimestamp = 0;
-  let pendingScrollY = 0;
-  let scrollScheduled = false;
-  let lastScrollDirection = 1; // 1 = scrolling down, -1 = scrolling up
-
-  function frameSrc(index) {
-    return `./frames/frame-${String(index + 1).padStart(3, '0')}.webp`;
-  }
-
-  function detectDevice() {
-    const ua = navigator.userAgent || '';
-    const isMobileUA = /Android|webOS|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
-    const isTabletUA =
-      /iPad/i.test(ua) ||
-      (navigator.maxTouchPoints > 1 && Math.min(window.screen.width, window.screen.height) >= 600);
-    const isSmallScreen =
-      window.innerWidth <= 768 || Math.min(window.screen.width, window.screen.height) <= 600;
-    const isMob = isMobileUA || (isSmallScreen && !isTabletUA);
-    const isTablet =
-      isTabletUA ||
-      (!isMob &&
-        window.innerWidth <= 1024 &&
-        (navigator.maxTouchPoints > 1 || window.innerHeight > window.innerWidth));
-    return { isMob, isTablet };
-  }
-
-  function updateLayoutCaches() {
-    maxScrollCache = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
-    if (typeof trackedSections !== 'undefined' && Array.isArray(trackedSections)) {
-      cachedSectionOffsets = trackedSections.map((sec) => ({
-        id: sec.id,
-        top: sec.offsetTop,
-      }));
-    }
-  }
-
-  function scrollYToFrame(scrollY) {
-    const progress = Math.min(1, Math.max(0, (scrollY / maxScrollCache) * SCROLL_ANIM_PACE));
-    return progress * (FRAME_COUNT - 1);
-  }
-
-  function computeDrawRect(imgW, imgH) {
-    const isPortrait = height > width;
-
-    if (isPortrait) {
-      // In portrait (mobile phones and portrait tablets):
-      // Display the complete original 16:9 video composition without excessive zooming or face cropping.
-      // Sizing to full viewport width displays 100% of the character and both atmospheric smoke sides.
-      const scale = width / imgW;
-      const drawW = Math.round(imgW * scale);
-      const drawH = Math.round(imgH * scale);
-      const offsetX = 0;
-      const offsetY = Math.round((height - drawH) * 0.35);
-      const fadeH = Math.min(32, Math.round(drawH * 0.16));
-
-      return { offsetX, offsetY, drawW, drawH, isPortrait: true, fadeH };
-    }
-
-    // Landscape (desktop, 4K monitors, laptops, and rotated landscape phones):
-    const coverScale = Math.max(width / imgW, height / imgH);
-    const drawW = imgW * coverScale;
-    const drawH = imgH * coverScale;
-    const offsetX = (width - drawW) * 0.5;
-    const offsetY = (height - drawH) * 0.5;
-
-    return { offsetX, offsetY, drawW, drawH, isPortrait: false, fadeH: 0 };
-  }
-
-  function resize() {
-    width = window.innerWidth;
-    height = window.innerHeight;
-    updateLayoutCaches();
-
-    const rawDpr = window.devicePixelRatio || 1;
-    canvasScale = Math.min(rawDpr, 2);
-
-    const physicalW = Math.round(width * canvasScale);
-    const physicalH = Math.round(height * canvasScale);
-
-    const { isMob, isTablet } = detectDevice();
-
-    // Dynamically tune cache capacity based on device capabilities
-    maxCachedFrames = isMob ? 140 : (isTablet ? 185 : 238);
-
-    let nextTargetW = 2560;
-    let nextTargetH = 1440;
-
-    if (isMob) {
-      // Mobile: 1280x720 for compact screens, 1600x900 for high-density Retina phones
-      if (physicalW <= 720 || width <= 390) {
-        nextTargetW = 1280;
-        nextTargetH = 720;
-      } else {
-        nextTargetW = 1600;
-        nextTargetH = 900;
+    /**
+     * Validates and sanitizes dynamic URLs, permitting only safe schemes.
+     * Prevents javascript:, data:text/html, vbscript:, and relative protocol abuse.
+     * @param {string|null|undefined} url
+     * @returns {string} Safe URL or empty string
+     */
+    sanitizeUrl(url) {
+      if (!url) return '';
+      const str = String(url).trim();
+      if (/^(https?:\/\/|mailto:|tel:|\/|\.\/|#)/i.test(str)) {
+        return str;
       }
-    } else if (isTablet) {
-      // Tablet: 1920x1080
-      nextTargetW = 1920;
-      nextTargetH = 1080;
-    } else {
-      // Desktop: 2560x1440 for 4K / QHD monitors, 1920x1080 for standard laptops
-      if (physicalW >= 2560 || width >= 1920) {
-        nextTargetW = 2560;
-        nextTargetH = 1440;
-      } else {
-        nextTargetW = 1920;
-        nextTargetH = 1080;
+      return '';
+    },
+
+    /**
+     * Validates image sources, allowing only secure http/https, relative assets, or safe data image URIs.
+     * @param {string|null|undefined} url
+     * @returns {string} Safe image URL or standard fallback placeholder
+     */
+    sanitizeImageUrl(url) {
+      if (!url) {
+        return 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=900&q=80';
       }
+      const str = String(url).trim();
+      if (/^(https?:\/\/|\/|\.\/|data:image\/(png|jpeg|jpg|webp|gif);base64,)/i.test(str)) {
+        return str;
+      }
+      return 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=900&q=80';
+    },
+
+    /**
+     * Sanitizes plain text fields by trimming control characters.
+     * @param {string|null|undefined} str
+     * @returns {string}
+     */
+    sanitizeText(str) {
+      if (str == null) return '';
+      return String(str).trim();
+    },
+  };
+
+  /* ==========================================================================
+     MODULE 2: DEVICE DETECTION & PROFILE HELPERS
+     Provides unified responsive and hardware capability detection
+     ========================================================================== */
+  const DeviceProfile = {
+    detect() {
+      const ua = navigator.userAgent || '';
+      const isMobileUA = /Android|webOS|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+      const isTabletUA =
+        /iPad/i.test(ua) ||
+        (navigator.maxTouchPoints > 1 && Math.min(window.screen.width, window.screen.height) >= 600);
+      const isSmallScreen =
+        window.innerWidth <= 768 || Math.min(window.screen.width, window.screen.height) <= 600;
+      const isMob = isMobileUA || (isSmallScreen && !isTabletUA);
+      const isTablet =
+        isTabletUA ||
+        (!isMob &&
+          window.innerWidth <= 1024 &&
+          (navigator.maxTouchPoints > 1 || window.innerHeight > window.innerWidth));
+      return { isMob, isTablet };
+    },
+  };
+
+  /* ==========================================================================
+     MODULE 3: DECOUPLED SCROLL CANVAS ANIMATION ENGINE
+     Decouples asynchronous frame decoding from the 60fps/120fps rAF render loop.
+     Enforces strict ImageBitmap caching with immediate GPU memory reclamation.
+     ========================================================================== */
+  const ScrollCanvasEngine = (() => {
+    const FRAME_COUNT = 238;
+    const SCROLL_ANIM_PACE = 2.1;
+    const USE_BITMAP =
+      window.location.protocol !== 'file:' && typeof window.createImageBitmap === 'function';
+
+    const canvas = document.getElementById('scroll-canvas');
+    if (!canvas) return null;
+    const ctx = canvas.getContext('2d', { alpha: false });
+
+    // Intelligent sliding cache with resource release (.close())
+    const frames = new Array(FRAME_COUNT).fill(null);
+    const loadingSet = new Set();
+    const abortControllers = new Map(); // index -> AbortController
+    const queue = [];
+    const CONCURRENCY = 8;
+    let activeWorkers = 0;
+    let maxCachedFrames = 238; // Dynamically tuned per device
+    let cachedCount = 0;
+
+    let width = 0;
+    let height = 0;
+    let canvasScale = 1;
+    let decodeTargetW = 2560;
+    let decodeTargetH = 1440;
+    let cachedDrawRect = null;
+    let cachedTopGrad = null;
+    let cachedBtmGrad = null;
+    let needsRender = false;
+    let maxScrollCache = 1;
+    let cachedSectionOffsets = [];
+
+    let targetFrame = 0;
+    let currentFrame = 0;
+    let lastRenderedPos = -1;
+    let rafId = null;
+    let lastTimestamp = 0;
+    let pendingScrollY = 0;
+    let scrollScheduled = false;
+    let lastScrollDirection = 1; // 1 = scrolling down, -1 = scrolling up
+
+    function frameSrc(index) {
+      return `./frames/frame-${String(index + 1).padStart(3, '0')}.webp`;
     }
 
-    // If decoding resolution changed, safely release and close previous ImageBitmaps
-    const resolutionChanged = (nextTargetW !== decodeTargetW || nextTargetH !== decodeTargetH);
-    decodeTargetW = nextTargetW;
-    decodeTargetH = nextTargetH;
-
-    if (resolutionChanged) {
-      for (let i = 0; i < FRAME_COUNT; i++) {
-        if (frames[i] && typeof frames[i].close === 'function') {
-          frames[i].close();
+    /**
+     * Safely closes and releases an ImageBitmap texture from GPU memory.
+     */
+    function releaseFrame(index) {
+      if (index < 0 || index >= FRAME_COUNT) return;
+      const bm = frames[index];
+      if (bm) {
+        if (typeof bm.close === 'function') {
+          try {
+            bm.close(); // Immediate GPU memory reclamation!
+          } catch (_) {}
         }
-        frames[i] = null;
+        frames[index] = null;
+        cachedCount = Math.max(0, cachedCount - 1);
       }
-      cachedCount = 0;
+    }
+
+    /**
+     * Completely purges all cached frames and in-flight fetch controllers.
+     */
+    function clearAllFrames() {
+      for (let i = 0; i < FRAME_COUNT; i++) {
+        releaseFrame(i);
+      }
+      abortControllers.forEach((ctrl) => {
+        try { ctrl.abort(); } catch (_) {}
+      });
+      abortControllers.clear();
       loadingSet.clear();
       queue.length = 0;
+      cachedCount = 0;
     }
 
-    // Resize canvas physical buffer only when dimensions or scale actually change
-    const targetCanvasW = Math.max(1, physicalW);
-    const targetCanvasH = Math.max(1, physicalH);
-    if (canvas.width !== targetCanvasW || canvas.height !== targetCanvasH) {
-      canvas.width = targetCanvasW;
-      canvas.height = targetCanvasH;
-      ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-    }
-
-    // Cache precomputed draw rectangle (avoids repeating layout math on every render)
-    cachedDrawRect = computeDrawRect(decodeTargetW, decodeTargetH);
-
-    // Cache portrait fade linear gradients once during resize (avoids allocating new gradients on every frame)
-    if (cachedDrawRect.isPortrait && cachedDrawRect.fadeH > 2) {
-      const { offsetY, drawH, fadeH } = cachedDrawRect;
-      cachedTopGrad = ctx.createLinearGradient(0, offsetY, 0, offsetY + fadeH);
-      cachedTopGrad.addColorStop(0, '#050308');
-      cachedTopGrad.addColorStop(1, 'rgba(5, 3, 8, 0)');
-
-      cachedBtmGrad = ctx.createLinearGradient(0, offsetY + drawH - fadeH, 0, offsetY + drawH);
-      cachedBtmGrad.addColorStop(0, 'rgba(5, 3, 8, 0)');
-      cachedBtmGrad.addColorStop(1, '#050308');
-    } else {
-      cachedTopGrad = null;
-      cachedBtmGrad = null;
-    }
-
-    lastRenderedPos = -1;
-    renderFrame(currentFrame, true);
-    ensureNeighborhood(Math.round(currentFrame), 0);
-
-    const currentCardW = width <= 600 ? 160 : (width <= 768 ? 210 : 270);
-    if (typeof lastCylinderCardW !== 'undefined' && lastCylinderCardW !== -1 && lastCylinderCardW !== currentCardW) {
-      lastCylinderCardW = currentCardW;
-      if (typeof renderProjects === 'function') renderProjects();
-    } else if (typeof lastCylinderCardW !== 'undefined') {
-      lastCylinderCardW = currentCardW;
-    }
-  }
-
-  function findNearestFrame(index) {
-    if (frames[index]) return index;
-    // Check nearest neighbors outward
-    for (let offset = 1; offset < FRAME_COUNT; offset++) {
-      const prev = index - offset;
-      const next = index + offset;
-      if (prev >= 0 && frames[prev]) return prev;
-      if (next < FRAME_COUNT && frames[next]) return next;
-    }
-    return -1;
-  }
-
-  function renderFrame(position, force = false) {
-    const clamped = Math.min(FRAME_COUNT - 1, Math.max(0, position));
-    const targetIdx = Math.round(clamped);
-    if (!force && targetIdx === lastRenderedPos) return;
-
-    const resolvedBase = findNearestFrame(targetIdx);
-    if (resolvedBase === -1) return;
-
-    // Avoid redundant redraw if the resolved fallback frame is already rendered
-    if (!force && resolvedBase === lastRenderedPos) return;
-
-    const baseImg = frames[resolvedBase];
-    if (!baseImg) return;
-
-    const rect = cachedDrawRect || computeDrawRect(decodeTargetW, decodeTargetH);
-    const { offsetX, offsetY, drawW, drawH, isPortrait, fadeH } = rect;
-
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = '#050308';
-    ctx.fillRect(0, 0, width, height);
-
-    // Draw crisp single master frame — zero ghosting, zero double-edge blur
-    ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
-
-    // On portrait mobile screens, softly feather top and bottom edges using pre-cached gradients (0 allocation)
-    if (isPortrait && cachedTopGrad && cachedBtmGrad && fadeH > 2) {
-      ctx.fillStyle = cachedTopGrad;
-      ctx.fillRect(offsetX, offsetY, drawW, fadeH);
-
-      ctx.fillStyle = cachedBtmGrad;
-      ctx.fillRect(offsetX, offsetY + drawH - fadeH, drawW, fadeH);
-    }
-
-    lastRenderedPos = resolvedBase;
-  }
-
-  function evictExcessFrames(centerIdx) {
-    if (cachedCount <= maxCachedFrames) return;
-
-    const SAFE_RADIUS = 24;
-    let furthestIdx = -1;
-    let maxDist = -1;
-
-    for (let i = 0; i < FRAME_COUNT; i++) {
-      if (frames[i] !== null) {
-        const dist = Math.abs(i - centerIdx);
-        // Do not evict frames in the immediate safe radius around the current frame
-        if (dist > SAFE_RADIUS && dist > maxDist) {
-          maxDist = dist;
-          furthestIdx = i;
-        }
-      }
-    }
-
-    if (furthestIdx !== -1) {
-      const evicted = frames[furthestIdx];
-      if (evicted && typeof evicted.close === 'function') {
-        evicted.close(); // Immediate GPU memory reclamation!
-      }
-      frames[furthestIdx] = null;
-      cachedCount = Math.max(0, cachedCount - 1);
-    }
-  }
-
-  function decodeFrame(index) {
-    if (index < 0 || index >= FRAME_COUNT) return Promise.resolve(null);
-    if (frames[index] !== null) return Promise.resolve(frames[index]);
-    if (loadingSet.has(index)) return Promise.resolve(null);
-
-    loadingSet.add(index);
-
-    if (USE_BITMAP) {
-      const resizeOpts =
-        decodeTargetW < 3840 && typeof createImageBitmap === 'function'
-          ? {
-              resizeWidth: decodeTargetW,
-              resizeHeight: decodeTargetH,
-              resizeQuality: 'high',
-            }
-          : undefined;
-
-      return fetch(frameSrc(index))
-        .then((res) => (res.ok ? res.blob() : null))
-        .then((blob) => {
-          if (!blob) return null;
-          if (resizeOpts) {
-            return createImageBitmap(blob, resizeOpts).catch(() => createImageBitmap(blob));
-          }
-          return createImageBitmap(blob);
-        })
-        .then((bm) => {
-          loadingSet.delete(index);
-          if (!bm) return null;
-
-          frames[index] = bm;
-          cachedCount++;
-
-          evictExcessFrames(Math.round(currentFrame));
-
-          // Mark dirty and schedule rAF render instead of drawing directly outside tick loop
-          if (Math.abs(currentFrame - index) < 1.5 || lastRenderedPos === -1) {
-            needsRender = true;
-            scheduleLoop();
-          }
-          return bm;
-        })
-        .catch(() => {
-          loadingSet.delete(index);
-          return null;
-        });
-    }
-
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.decoding = 'async';
-      const onDone = (success) => {
-        loadingSet.delete(index);
-        if (success) {
-          frames[index] = img;
-          cachedCount++;
-          evictExcessFrames(Math.round(currentFrame));
-          // Mark dirty and schedule rAF render instead of drawing directly outside tick loop
-          if (Math.abs(currentFrame - index) < 1.5 || lastRenderedPos === -1) {
-            needsRender = true;
-            scheduleLoop();
-          }
-        }
-        resolve(success ? img : null);
-      };
-
-      img.onload = () => {
-        if (typeof img.decode === 'function') img.decode().then(() => onDone(true), () => onDone(true));
-        else onDone(true);
-      };
-      img.onerror = () => onDone(false);
-      img.src = frameSrc(index);
-    });
-  }
-
-  function pumpQueue() {
-    while (activeWorkers < CONCURRENCY && queue.length > 0) {
-      const idx = queue.shift();
-      if (frames[idx] === null && !loadingSet.has(idx)) {
-        activeWorkers++;
-        decodeFrame(idx).finally(() => {
-          activeWorkers--;
-          pumpQueue();
-        });
-      }
-    }
-  }
-
-  function requestFrame(index, highPriority = false) {
-    if (index < 0 || index >= FRAME_COUNT) return;
-    if (frames[index] !== null || loadingSet.has(index)) return;
-
-    const existingPos = queue.indexOf(index);
-    if (existingPos !== -1) {
-      if (highPriority && existingPos > 0) {
-        queue.splice(existingPos, 1);
-        queue.unshift(index);
-      }
-      return;
-    }
-
-    if (highPriority) {
-      queue.unshift(index);
-    } else {
-      queue.push(index);
-    }
-    pumpQueue();
-  }
-
-  function ensureNeighborhood(centerIdx, direction = 1) {
-    // Priority 1: Current frame
-    requestFrame(centerIdx, true);
-
-    // Priority 2: Immediate adjacent frames
-    const forward1 = centerIdx + 1;
-    const backward1 = centerIdx - 1;
-    if (direction >= 0) {
-      if (forward1 < FRAME_COUNT) requestFrame(forward1, true);
-      if (backward1 >= 0) requestFrame(backward1, true);
-    } else {
-      if (backward1 >= 0) requestFrame(backward1, true);
-      if (forward1 < FRAME_COUNT) requestFrame(forward1, true);
-    }
-
-    // Priority 3: Directional lookahead (wider buffer for rapid scroll jumps)
-    const lookahead = 18;
-    for (let offset = 2; offset <= lookahead; offset++) {
-      const primary = direction >= 0 ? centerIdx + offset : centerIdx - offset;
-      const secondary = direction >= 0 ? centerIdx - offset : centerIdx + offset;
-      if (primary >= 0 && primary < FRAME_COUNT) requestFrame(primary, false);
-      if (secondary >= 0 && secondary < FRAME_COUNT && offset <= 4) requestFrame(secondary, false);
-    }
-  }
-
-  function preloadKeyframes() {
-    // Background load a sparse spine (every 10th frame) across all 238 frames
-    // Guarantees fast scrolls land within <= 5 frames of an existing frame
-    for (let i = 0; i < FRAME_COUNT; i += 10) {
-      requestFrame(i, false);
-    }
-    requestFrame(FRAME_COUNT - 1, false);
-  }
-
-  function tick(timestamp) {
-    const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, 0.05) : 1 / 60;
-    lastTimestamp = timestamp;
-
-    if (scrollScheduled) {
-      scrollScheduled = false;
-      const newTarget = scrollYToFrame(pendingScrollY);
-      const diff = newTarget - targetFrame;
-      if (Math.abs(diff) > 0.01) {
-        lastScrollDirection = diff >= 0 ? 1 : -1;
-      }
-      targetFrame = newTarget;
-      updateHeaderAndNav(pendingScrollY);
-      ensureNeighborhood(Math.round(targetFrame), lastScrollDirection);
-    }
-
-    const frameDelta = targetFrame - currentFrame;
-    const absDelta = Math.abs(frameDelta);
-
-    if (absDelta < 0.008) {
-      currentFrame = targetFrame;
-      renderFrame(currentFrame, needsRender);
-      needsRender = false;
-      rafId = null;
-      lastTimestamp = 0;
-      return;
-    }
-
-    // Dynamic adaptive easing: responsive when scrolling fast, silky smooth when scrolling slowly
-    const dynamicEase = absDelta > 6 ? 32 : (absDelta > 2 ? 26 : 22);
-    const factor = 1 - Math.exp(-dynamicEase * dt);
-
-    currentFrame += frameDelta * factor;
-    renderFrame(currentFrame);
-    needsRender = false;
-    rafId = requestAnimationFrame(tick);
-  }
-
-  function scheduleLoop() {
-    if (rafId === null) {
-      lastTimestamp = 0;
-      rafId = requestAnimationFrame(tick);
-    }
-  }
-
-  function onNativeScroll() {
-    pendingScrollY = window.scrollY;
-    scrollScheduled = true;
-    scheduleLoop();
-  }
-
-  /* =========================================
-     2. Sticky Header, Scroll Spy & Mobile Menu
-     ========================================= */
-  const header = document.getElementById('site-header');
-  const navToggle = document.getElementById('nav-toggle');
-  const mobileMenu = document.getElementById('mobile-menu');
-  const navLinks = Array.from(document.querySelectorAll('#desktop-nav a[data-nav]'));
-  const trackedSections = ['home', 'about', 'skills', 'projects', 'services', 'contact']
-    .map((id) => document.getElementById(id))
-    .filter(Boolean);
-
-  let lastHeaderScrolled = false;
-  let lastActiveNavId = '';
-
-  function updateHeaderAndNav(scrollPos = window.scrollY) {
-    const scrolled = scrollPos > 24;
-    if (header && scrolled !== lastHeaderScrolled) {
-      lastHeaderScrolled = scrolled;
-      header.classList.toggle('is-scrolled', scrolled);
-    }
-
-    const probe = scrollPos + height * 0.35;
-    let activeId = 'home';
-    for (let i = 0; i < cachedSectionOffsets.length; i++) {
-      if (probe >= cachedSectionOffsets[i].top) {
-        activeId = cachedSectionOffsets[i].id;
-      }
-    }
-
-    if (activeId !== lastActiveNavId) {
-      lastActiveNavId = activeId;
-      navLinks.forEach((link) => {
-        link.classList.toggle('is-active', link.dataset.nav === activeId);
-      });
-    }
-  }
-
-  function closeMobileMenu() {
-    if (!mobileMenu || !navToggle) return;
-    mobileMenu.hidden = true;
-    navToggle.setAttribute('aria-expanded', 'false');
-  }
-
-  if (navToggle && mobileMenu) {
-    navToggle.addEventListener('click', () => {
-      const willOpen = mobileMenu.hidden;
-      mobileMenu.hidden = !willOpen;
-      navToggle.setAttribute('aria-expanded', String(willOpen));
-    });
-
-    mobileMenu.querySelectorAll('a').forEach((link) => {
-      link.addEventListener('click', closeMobileMenu);
-    });
-  }
-
-  /* =========================================
-     3. Dynamic Profile Hydration (from Store / Supabase)
-     ========================================= */
-  const store = window.PortfolioStore;
-
-  function applyProfile(profileData) {
-    if (!store) return;
-    const profile = profileData || store.getProfile();
-
-    document.querySelectorAll('[data-profile]').forEach((el) => {
-      const key = el.dataset.profile;
-      if (profile[key]) el.textContent = profile[key];
-    });
-
-    document.querySelectorAll('[data-profile-multiline]').forEach((el) => {
-      const key = el.dataset.profileMultiline;
-      if (profile[key]) {
-        el.innerHTML = '';
-        const lines = String(profile[key]).split('\n');
-        lines.forEach((line, idx) => {
-          el.appendChild(document.createTextNode(line));
-          if (idx < lines.length - 1) el.appendChild(document.createElement('br'));
-        });
-      }
-    });
-
-    document.querySelectorAll('[data-profile-href]').forEach((el) => {
-      const key = el.dataset.profileHref;
-      const url = store.normalizeExternalUrl(profile[key]);
-      if (url) el.setAttribute('href', url);
-    });
-
-    document.querySelectorAll('[data-profile-mailto]').forEach((el) => {
-      const key = el.dataset.profileMailto;
-      if (profile[key]) el.setAttribute('href', `mailto:${profile[key]}`);
-    });
-
-    document.querySelectorAll('[data-profile-tel]').forEach((el) => {
-      const key = el.dataset.profileTel;
-      if (profile[key]) {
-        const cleanPhone = String(profile[key]).replace(/[^+\d]/g, '');
-        el.setAttribute('href', `tel:${cleanPhone}`);
-      }
-    });
-  }
-
-  /* =========================================
-     4. Dynamic 3D Revolving Circular Projects Engine + Category Dropdown
-     ========================================= */
-  const categorySelectBtn = document.getElementById('category-select-btn');
-  const categoryMenu = document.getElementById('category-menu');
-  const catBtnLabel = document.getElementById('cat-btn-label');
-
-  const carouselStage = document.getElementById('carousel-stage');
-  const carouselCylinder = document.getElementById('carousel-cylinder');
-  const carouselPrevBtn = document.getElementById('carousel-prev-btn');
-  const carouselNextBtn = document.getElementById('carousel-next-btn');
-  const carouselDots = document.getElementById('carousel-dots');
-
-  let cachedProjects = store ? store.getProjects() : [];
-  let activeCategory = 'ALL';
-
-  // 3D Cylinder Carousel physics & animation state
-  let carouselItems = [];
-  let currentAngle = 0;
-  let targetAngle = 0;
-  let isDragging = false;
-  let dragStartX = 0;
-  let dragStartAngle = 0;
-  let isHovered = false;
-  let autoSpinSpeed = 0.16; // Naturally brisk, smooth 360° spin
-  let carouselRaf = null;
-  let slotCount = 1;
-  let slotAngleStep = 360;
-  let lastCylinderCardW = -1;
-  let cachedDotEls = [];
-  let lastClosestIndex = -1;
-  let isCarouselInView = false;
-  let carouselObserver = null;
-
-  function formatCategoryTitle(cat) {
-    if (cat === 'ALL') return 'All Categories';
-    return cat
-      .toLowerCase()
-      .split(' ')
-      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-      .join(' ');
-  }
-
-  function renderCategoryDropdown(categories, projects) {
-    if (!categoryMenu || !categorySelectBtn || !catBtnLabel) return;
-
-    categoryMenu.innerHTML = '';
-    categories.forEach((cat) => {
-      const count =
-        cat === 'ALL'
-          ? projects.length
-          : projects.filter(
-              (p) => String(p.category || '').trim().toUpperCase() === cat,
-            ).length;
-
-      const itemBtn = document.createElement('button');
-      itemBtn.type = 'button';
-      itemBtn.className = `category-item${cat === activeCategory ? ' is-active' : ''}`;
-      itemBtn.setAttribute('role', 'menuitem');
-
-      const nameSpan = document.createElement('span');
-      nameSpan.textContent = formatCategoryTitle(cat);
-
-      const countBadge = document.createElement('span');
-      countBadge.className = 'cat-count-badge';
-      countBadge.textContent = String(count);
-
-      itemBtn.appendChild(nameSpan);
-      itemBtn.appendChild(countBadge);
-
-      itemBtn.addEventListener('click', () => {
-        activeCategory = cat;
-        catBtnLabel.textContent = formatCategoryTitle(cat);
-        closeCategoryMenu();
-        renderProjects();
-      });
-
-      categoryMenu.appendChild(itemBtn);
-    });
-
-    catBtnLabel.textContent = formatCategoryTitle(activeCategory);
-  }
-
-  function toggleCategoryMenu() {
-    if (!categoryMenu || !categorySelectBtn) return;
-    const isExpanded = categorySelectBtn.getAttribute('aria-expanded') === 'true';
-    if (isExpanded) {
-      closeCategoryMenu();
-    } else {
-      openCategoryMenu();
-    }
-  }
-
-  function openCategoryMenu() {
-    if (!categoryMenu || !categorySelectBtn) return;
-    categorySelectBtn.setAttribute('aria-expanded', 'true');
-    categoryMenu.hidden = false;
-  }
-
-  function closeCategoryMenu() {
-    if (!categoryMenu || !categorySelectBtn) return;
-    categorySelectBtn.setAttribute('aria-expanded', 'false');
-    categoryMenu.hidden = true;
-  }
-
-  if (categorySelectBtn) {
-    categorySelectBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleCategoryMenu();
-    });
-  }
-
-  document.addEventListener('click', (e) => {
-    if (
-      categoryMenu &&
-      !categoryMenu.hidden &&
-      !categoryMenu.contains(e.target) &&
-      !categorySelectBtn.contains(e.target)
-    ) {
-      closeCategoryMenu();
-    }
-  });
-
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && categoryMenu && !categoryMenu.hidden) {
-      closeCategoryMenu();
-    }
-  });
-
-  function updateCarouselPhysics() {
-    if (!isCarouselInView || !carouselCylinder || carouselItems.length === 0) {
-      carouselRaf = null;
-      return;
-    }
-
-    if (!isDragging && !isHovered && slotCount > 1) {
-      targetAngle -= autoSpinSpeed;
-    }
-
-    // Smooth elastic lerp towards target angle
-    const diff = targetAngle - currentAngle;
-    currentAngle += diff * 0.14;
-
-    carouselCylinder.style.transform = `rotateY(${currentAngle}deg)`;
-
-    const halfStep = slotAngleStep / 2;
-    let closestIndex = 0;
-    let minAngularDist = 999;
-
-    const itemCount = carouselItems.length;
-    for (let i = 0; i < itemCount; i++) {
-      const item = carouselItems[i];
-      // Calculate normalized angle relative to viewer (-180 to +180)
-      const rawTheta = (item.baseAngle + currentAngle) % 360;
-      const theta = ((rawTheta + 540) % 360) - 180;
-      const absTheta = Math.abs(theta);
-
-      const rad = (theta * Math.PI) / 180;
-      const cosVal = Math.cos(rad);
-
-      // Backface Culling: Cull cards completely facing away from viewer (cosVal < -0.05)
-      if (cosVal < -0.05) {
-        if (item.isVisible) {
-          item.el.style.visibility = 'hidden';
-          item.el.style.pointerEvents = 'none';
-          item.isVisible = false;
-        }
-        continue;
-      }
-
-      // Restore visibility if card was previously culled
-      if (!item.isVisible) {
-        item.el.style.visibility = '';
-        item.isVisible = true;
-      }
-
-      // Facing front: within half a step
-      const isFront = absTheta <= halfStep;
-      if (item.isActive !== isFront) {
-        item.isActive = isFront;
-        item.el.classList.toggle('is-active', isFront);
-        item.el.style.pointerEvents = isFront ? 'auto' : 'none';
-      }
-
-      if (absTheta < minAngularDist) {
-        minAngularDist = absTheta;
-        closestIndex = item.projectIndex;
-      }
-
-      // Smooth depth perspective: front card full opacity, back cards curve gracefully into depth
-      const depthOpacity = Math.round(Math.max(0.35, Math.min(1, 0.4 + 0.6 * cosVal)) * 100) / 100;
-      if (item.lastOpacity !== depthOpacity) {
-        item.lastOpacity = depthOpacity;
-        item.el.style.opacity = String(depthOpacity);
-      }
-    }
-
-    // Update pagination dots only when closestIndex changes
-    if (closestIndex !== lastClosestIndex && cachedDotEls.length > 0) {
-      if (lastClosestIndex >= 0 && cachedDotEls[lastClosestIndex]) {
-        cachedDotEls[lastClosestIndex].classList.remove('is-active');
-      }
-      if (cachedDotEls[closestIndex]) {
-        cachedDotEls[closestIndex].classList.add('is-active');
-      }
-      lastClosestIndex = closestIndex;
-    }
-
-    carouselRaf = requestAnimationFrame(updateCarouselPhysics);
-  }
-
-  function startCarouselLoop() {
-    if (carouselRaf === null && isCarouselInView) {
-      carouselRaf = requestAnimationFrame(updateCarouselPhysics);
-    }
-  }
-
-  function stopCarouselLoop() {
-    if (carouselRaf !== null) {
-      cancelAnimationFrame(carouselRaf);
-      carouselRaf = null;
-    }
-  }
-
-  function initCarouselVisibilityObserver() {
-    const container = document.getElementById('projects-carousel-container') || document.getElementById('projects');
-    if (!container) {
-      isCarouselInView = true;
-      startCarouselLoop();
-      return;
-    }
-
-    if ('IntersectionObserver' in window) {
-      if (carouselObserver) {
-        carouselObserver.disconnect();
-      }
-      carouselObserver = new IntersectionObserver(
-        (entries) => {
-          const entry = entries[0];
-          const inView = !!(entry && (entry.isIntersecting || entry.intersectionRatio > 0));
-          if (inView !== isCarouselInView) {
-            isCarouselInView = inView;
-            if (isCarouselInView) {
-              startCarouselLoop();
-            } else {
-              stopCarouselLoop();
+    /**
+     * Evicts excess frames furthest from current position to enforce strict memory bounds.
+     */
+    function evictExcessFrames(centerIdx) {
+      if (cachedCount <= maxCachedFrames) return;
+      const SAFE_RADIUS = 24;
+
+      while (cachedCount > maxCachedFrames) {
+        let furthestIdx = -1;
+        let maxDist = -1;
+
+        for (let i = 0; i < FRAME_COUNT; i++) {
+          if (frames[i] !== null) {
+            const dist = Math.abs(i - centerIdx);
+            // Protect frames within immediate safe radius
+            if (dist > SAFE_RADIUS && dist > maxDist) {
+              maxDist = dist;
+              furthestIdx = i;
             }
           }
-        },
-        {
-          root: null,
-          rootMargin: '150px 0px 150px 0px',
-          threshold: 0,
         }
-      );
-      carouselObserver.observe(container);
-    } else {
-      isCarouselInView = true;
-      startCarouselLoop();
-    }
-  }
 
-  function rotateToProjectIndex(targetIdx) {
-    if (slotCount <= 1) return;
-    const item = carouselItems.find((it) => it.projectIndex === targetIdx);
-    if (!item) return;
+        if (furthestIdx === -1) {
+          // All cached frames are within safe radius
+          break;
+        }
 
-    const rawTheta = (item.baseAngle + targetAngle) % 360;
-    const theta = ((rawTheta + 540) % 360) - 180;
-    targetAngle -= theta;
-    if (isCarouselInView) {
-      startCarouselLoop();
-    }
-  }
-
-  function renderProjects(listOverride) {
-    if (!store || !carouselCylinder) return;
-    if (Array.isArray(listOverride)) {
-      cachedProjects = listOverride;
-    }
-    const projects = cachedProjects;
-
-    const categories = ['ALL'];
-    projects.forEach((p) => {
-      const cat = String(p.category || 'PROJECT').trim().toUpperCase();
-      if (cat && !categories.includes(cat)) categories.push(cat);
-    });
-
-    if (!categories.includes(activeCategory)) {
-      activeCategory = 'ALL';
-    }
-
-    renderCategoryDropdown(categories, projects);
-
-    const visible =
-      activeCategory === 'ALL'
-        ? projects
-        : projects.filter(
-            (p) => String(p.category || '').trim().toUpperCase() === activeCategory,
-          );
-
-    stopCarouselLoop();
-    carouselCylinder.innerHTML = '';
-    carouselItems = [];
-
-    if (visible.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'projects-empty';
-      empty.textContent = 'No projects published in this category yet.';
-      carouselCylinder.appendChild(empty);
-      if (carouselDots) carouselDots.innerHTML = '';
-      return;
-    }
-
-    // Determine circular slot repetition so the circle is rich and continuous (min 4 slots for 3D orbit)
-    let slots = [];
-    if (visible.length >= 4) {
-      slots = visible.map((p, idx) => ({ project: p, projectIndex: idx }));
-    } else if (visible.length === 3) {
-      slots = [
-        ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
-        ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
-      ];
-    } else if (visible.length === 2) {
-      slots = [
-        ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
-        ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
-        ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
-      ];
-    } else {
-      slots = [{ project: visible[0], projectIndex: 0 }];
-    }
-
-    slotCount = slots.length;
-    slotAngleStep = 360 / slotCount;
-
-    // Radius calculation for 3D cylinder (compact, proportional for all screen sizes)
-    const isMobile = window.innerWidth <= 600;
-    const isTablet = window.innerWidth <= 768;
-    const cardWidth = isMobile ? 160 : isTablet ? 210 : 270;
-
-    let radius = 0;
-    if (slotCount >= 3) {
-      const radPerSlot = (Math.PI / slotCount);
-      const computedR = (cardWidth / 2) / Math.tan(radPerSlot);
-      radius = Math.max(isMobile ? 130 : (isTablet ? 180 : 220), Math.round(computedR + (isMobile ? 8 : 20)));
-    }
-
-    slots.forEach((slot, sIdx) => {
-      const baseAngle = sIdx * slotAngleStep;
-      const proj = slot.project;
-
-      const card = document.createElement('article');
-      card.className = 'carousel-card';
-      card.style.transform = `rotateY(${baseAngle}deg) translateZ(${radius}px)`;
-
-      const imgSrc =
-        proj.image ||
-        'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=900&q=80';
-      const imgAlt = proj.title ? String(proj.title).replace(/"/g, '&quot;') : 'Project preview';
-      const categoryText = proj.category || 'PROJECT';
-      const indexNum = `#${String(slot.projectIndex + 1).padStart(2, '0')}`;
-      const titleText = proj.title || 'Untitled Project';
-      const descText = proj.description || '';
-
-      const href = store.normalizeExternalUrl(proj.link);
-      const linkHtml = href
-        ? `<a class="project-link" href="${href}" ${/^https?:\/\//i.test(href) ? 'target="_blank" rel="noopener noreferrer"' : ''}><span>View Project</span><span aria-hidden="true">↗</span></a>`
-        : `<span class="project-link--muted">Case Study • Selected Work</span>`;
-
-      card.innerHTML = `
-        <div class="project-thumb">
-          <img src="${imgSrc}" alt="${imgAlt}" loading="lazy">
-          <span class="project-badge">${categoryText}</span>
-          <span class="project-index">${indexNum}</span>
-        </div>
-        <div class="project-body">
-          <h3 class="project-title">${titleText}</h3>
-          <p class="project-desc">${descText}</p>
-          <div class="project-footer">
-            ${linkHtml}
-          </div>
-        </div>
-      `;
-
-      card.addEventListener('click', () => {
-        if (card.classList.contains('is-active')) return;
-        rotateToProjectIndex(slot.projectIndex);
-      });
-
-      carouselCylinder.appendChild(card);
-      carouselItems.push({
-        el: card,
-        baseAngle,
-        projectIndex: slot.projectIndex,
-        isActive: false,
-        isVisible: true,
-        lastOpacity: -1,
-      });
-    });
-
-    // Render pagination dots for each unique visible project
-    if (carouselDots) {
-      carouselDots.innerHTML = '';
-      visible.forEach((_, vIdx) => {
-        const dot = document.createElement('button');
-        dot.type = 'button';
-        dot.className = `carousel-dot${vIdx === 0 ? ' is-active' : ''}`;
-        dot.setAttribute('role', 'tab');
-        dot.setAttribute('aria-label', `Go to project ${vIdx + 1}`);
-        dot.addEventListener('click', () => {
-          rotateToProjectIndex(vIdx);
-        });
-        carouselDots.appendChild(dot);
-      });
-      cachedDotEls = Array.from(carouselDots.querySelectorAll('.carousel-dot'));
-    } else {
-      cachedDotEls = [];
-    }
-    lastClosestIndex = -1;
-
-    if (isCarouselInView) {
-      startCarouselLoop();
-    }
-    updateLayoutCaches();
-    onNativeScroll();
-  }
-
-  // Prev / Next Button Controls
-  if (carouselPrevBtn) {
-    carouselPrevBtn.addEventListener('click', () => {
-      targetAngle += slotAngleStep;
-      if (isCarouselInView) startCarouselLoop();
-    });
-  }
-
-  if (carouselNextBtn) {
-    carouselNextBtn.addEventListener('click', () => {
-      targetAngle -= slotAngleStep;
-      if (isCarouselInView) startCarouselLoop();
-    });
-  }
-
-  // Pointer Drag & Touch Swipe Controls for 360° Circular Rotation
-  if (carouselStage) {
-    carouselStage.addEventListener('pointerenter', () => {
-      isHovered = true;
-    });
-
-    carouselStage.addEventListener('pointerleave', () => {
-      isHovered = false;
-      if (isDragging) {
-        isDragging = false;
-        carouselStage.classList.remove('is-dragging');
-        targetAngle = Math.round(targetAngle / slotAngleStep) * slotAngleStep;
+        releaseFrame(furthestIdx);
       }
-    });
-
-    carouselStage.addEventListener('pointerdown', (e) => {
-      if (slotCount <= 1) return;
-      isDragging = true;
-      dragStartX = e.clientX;
-      dragStartAngle = targetAngle;
-      carouselStage.classList.add('is-dragging');
-    });
-
-    window.addEventListener('pointermove', (e) => {
-      if (!isDragging) return;
-      const deltaX = e.clientX - dragStartX;
-      targetAngle = dragStartAngle + deltaX * 0.42;
-    });
-
-    window.addEventListener('pointerup', () => {
-      if (!isDragging) return;
-      isDragging = false;
-      if (carouselStage) carouselStage.classList.remove('is-dragging');
-      // Snap to closest slot
-      targetAngle = Math.round(targetAngle / slotAngleStep) * slotAngleStep;
-    });
-
-    window.addEventListener('pointercancel', () => {
-      if (!isDragging) return;
-      isDragging = false;
-      if (carouselStage) carouselStage.classList.remove('is-dragging');
-      targetAngle = Math.round(targetAngle / slotAngleStep) * slotAngleStep;
-    });
-  }
-
-  /* =========================================
-     5. Contact Inquiry Modal + Toasts + Admin Lock + Phone Copy
-     ========================================= */
-  const modal = document.getElementById('contact-modal');
-  const modalClose = document.getElementById('modal-close');
-  const inquiryForm = document.getElementById('inquiry-form');
-  const serviceSelect = document.getElementById('inq-service');
-  const toastStack = document.getElementById('toast-stack');
-
-  function showToast(message) {
-    if (!toastStack) return;
-    const item = document.createElement('div');
-    item.className = 'toast';
-    item.textContent = message;
-    toastStack.appendChild(item);
-    setTimeout(() => item.remove(), 3600);
-  }
-
-  function openContactModal(serviceName) {
-    closeMobileMenu();
-    if (!modal) return;
-    if (serviceName && serviceSelect) {
-      const hasOpt = Array.from(serviceSelect.options).some((o) => o.value === serviceName);
-      if (hasOpt) serviceSelect.value = serviceName;
     }
-    modal.hidden = false;
-    const nameInput = document.getElementById('inq-name');
-    if (nameInput) nameInput.focus();
-  }
 
-  function closeContactModal() {
-    if (!modal) return;
-    modal.hidden = true;
-  }
-
-  document.querySelectorAll('[data-open-contact]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      openContactModal(btn.dataset.openContact || '');
-    });
-    if (btn.getAttribute('role') === 'button') {
-      btn.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          openContactModal(btn.dataset.openContact || '');
+    /**
+     * Cancels obsolete in-flight frame network requests during rapid scrolling jumps.
+     */
+    function cancelObsoleteRequests(centerIdx) {
+      abortControllers.forEach((ctrl, idx) => {
+        // Protect sparse keyframe spine (every 10th frame)
+        if (idx % 10 !== 0 && Math.abs(idx - centerIdx) > 36) {
+          try { ctrl.abort(); } catch (_) {}
+          abortControllers.delete(idx);
+          loadingSet.delete(idx);
         }
       });
     }
-  });
 
-  if (modalClose) {
-    modalClose.addEventListener('click', closeContactModal);
-  }
-
-  if (modal) {
-    modal.addEventListener('click', (e) => {
-      if (e.target === modal) closeContactModal();
-    });
-  }
-
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      closeContactModal();
-      closeMobileMenu();
-    }
-  });
-
-  if (inquiryForm) {
-    inquiryForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const name = document.getElementById('inq-name').value.trim();
-      const email = document.getElementById('inq-email').value.trim();
-      const service = document.getElementById('inq-service').value;
-      const details = document.getElementById('inq-details').value.trim();
-
-      if (!name || !email || !details) return;
-      const submitBtn = inquiryForm.querySelector('button[type="submit"]');
-      if (submitBtn) submitBtn.disabled = true;
-      try {
-        if (store) {
-          await store.addInquiry({ name, email, service, details });
+    /**
+     * Prunes obsolete requests from the pending decode queue.
+     */
+    function pruneQueue(centerIdx, lookahead = 20) {
+      for (let i = queue.length - 1; i >= 0; i--) {
+        const idx = queue[i];
+        if (idx % 10 !== 0 && Math.abs(idx - centerIdx) > lookahead + 8) {
+          queue.splice(i, 1);
         }
-        inquiryForm.reset();
-        closeContactModal();
-        showToast('Inquiry received! Hamood will respond shortly.');
-      } finally {
-        if (submitBtn) submitBtn.disabled = false;
       }
-    });
-  }
+    }
 
-  // Hidden Admin Lock tucked behind HS logo (both Header and Footer)
-  function bindLogoAdminToggle(wrapId, triggerId, linkId) {
-    const wrap = document.getElementById(wrapId);
-    const trigger = document.getElementById(triggerId);
-    const link = document.getElementById(linkId);
-    if (!wrap || !trigger || !link) return;
+    function decodeFrame(index) {
+      if (index < 0 || index >= FRAME_COUNT) return Promise.resolve(null);
+      if (frames[index] !== null) return Promise.resolve(frames[index]);
+      if (loadingSet.has(index)) return Promise.resolve(null);
 
-    trigger.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const revealed = wrap.classList.toggle('is-revealed');
-      trigger.setAttribute('aria-expanded', String(revealed));
-      link.setAttribute('tabindex', revealed ? '0' : '-1');
-    });
+      loadingSet.add(index);
+      const controller = new AbortController();
+      abortControllers.set(index, controller);
 
-    document.addEventListener('click', (e) => {
-      if (!wrap.contains(e.target) && wrap.classList.contains('is-revealed')) {
-        wrap.classList.remove('is-revealed');
-        trigger.setAttribute('aria-expanded', 'false');
-        link.setAttribute('tabindex', '-1');
+      if (USE_BITMAP) {
+        const resizeOpts =
+          decodeTargetW < 3840 && typeof createImageBitmap === 'function'
+            ? {
+                resizeWidth: decodeTargetW,
+                resizeHeight: decodeTargetH,
+                resizeQuality: 'high',
+              }
+            : undefined;
+
+        return fetch(frameSrc(index), { signal: controller.signal })
+          .then((res) => (res.ok ? res.blob() : null))
+          .then((blob) => {
+            if (!blob) return null;
+            if (resizeOpts) {
+              return createImageBitmap(blob, resizeOpts).catch(() => createImageBitmap(blob));
+            }
+            return createImageBitmap(blob);
+          })
+          .then((bm) => {
+            loadingSet.delete(index);
+            abortControllers.delete(index);
+            if (!bm) return null;
+
+            // In case frame was filled while decoding, release redundant bitmap immediately
+            if (frames[index] !== null) {
+              if (typeof bm.close === 'function') {
+                try { bm.close(); } catch (_) {}
+              }
+              return frames[index];
+            }
+
+            frames[index] = bm;
+            cachedCount++;
+
+            evictExcessFrames(Math.round(currentFrame));
+
+            // Mark dirty and schedule rAF render instead of drawing directly outside tick loop
+            if (Math.abs(currentFrame - index) < 1.5 || lastRenderedPos === -1) {
+              needsRender = true;
+              scheduleLoop();
+            }
+            return bm;
+          })
+          .catch(() => {
+            loadingSet.delete(index);
+            abortControllers.delete(index);
+            return null;
+          });
       }
-    });
-  }
 
-  // Hidden Admin Lock tucked behind bottom (footer) HS logo only
-  bindLogoAdminToggle('footer-logo-wrap', 'admin-lock-trigger', 'footer-admin-link');
-
-  // Desktop / Laptop Only: Phone Number Copy to Clipboard with Toast Feedback
-  const phoneCard = document.querySelector('[data-profile-tel="phone"]');
-  if (phoneCard) {
-    phoneCard.addEventListener('click', (e) => {
-      const isMobile =
-        /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
-        ('ontouchstart' in window && window.innerWidth <= 768);
-
-      if (!isMobile) {
-        // Laptop / Desktop: copy phone number to clipboard instantly
-        e.preventDefault();
-        const phoneValEl = phoneCard.querySelector('[data-profile="phone"]');
-        const rawPhone = phoneValEl ? phoneValEl.textContent.trim() : '+92 343 6956890';
-
-        const notifySuccess = () => {
-          showToast(`Phone number copied to clipboard: ${rawPhone}`);
-          phoneCard.classList.add('is-copied');
-          setTimeout(() => phoneCard.classList.remove('is-copied'), 2200);
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.decoding = 'async';
+        const onDone = (success) => {
+          loadingSet.delete(index);
+          abortControllers.delete(index);
+          if (success) {
+            frames[index] = img;
+            cachedCount++;
+            evictExcessFrames(Math.round(currentFrame));
+            if (Math.abs(currentFrame - index) < 1.5 || lastRenderedPos === -1) {
+              needsRender = true;
+              scheduleLoop();
+            }
+          }
+          resolve(success ? img : null);
         };
 
-        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-          navigator.clipboard.writeText(rawPhone).then(notifySuccess, () => {
-            fallbackCopy(rawPhone);
-            notifySuccess();
+        img.onload = () => {
+          if (typeof img.decode === 'function') img.decode().then(() => onDone(true), () => onDone(true));
+          else onDone(true);
+        };
+        img.onerror = () => onDone(false);
+        img.src = frameSrc(index);
+      });
+    }
+
+    function pumpQueue() {
+      while (activeWorkers < CONCURRENCY && queue.length > 0) {
+        const idx = queue.shift();
+        if (frames[idx] === null && !loadingSet.has(idx)) {
+          activeWorkers++;
+          decodeFrame(idx).finally(() => {
+            activeWorkers--;
+            pumpQueue();
           });
-        } else {
-          fallbackCopy(rawPhone);
-          notifySuccess();
         }
       }
-      // On mobile / phones: Native tel: protocol opens the phone dialer naturally!
-    });
-  }
-
-  function fallbackCopy(text) {
-    const temp = document.createElement('textarea');
-    temp.value = text;
-    temp.setAttribute('readonly', '');
-    temp.style.position = 'absolute';
-    temp.style.left = '-9999px';
-    document.body.appendChild(temp);
-    temp.select();
-    document.execCommand('copy');
-    temp.remove();
-  }
-
-  let cloudSyncInFlight = false;
-  async function syncFromCloud() {
-    if (!store || cloudSyncInFlight) return;
-    cloudSyncInFlight = true;
-    try {
-      const [{ profile }, { projects }] = await Promise.all([
-        store.fetchProfile(),
-        store.fetchProjects(),
-      ]);
-      if (profile) applyProfile(profile);
-      // Always render latest cloud projects (including when 0 projects remain after delete!)
-      if (Array.isArray(projects)) {
-        renderProjects(projects);
-      }
-    } catch {
-      // Keep local fallback smoothly
-    } finally {
-      cloudSyncInFlight = false;
     }
-  }
 
-  // Real-time live sync: BroadcastChannel + storage + Supabase Realtime + tab focus
-  if (store && typeof store.subscribeToLiveUpdates === 'function') {
-    store.subscribeToLiveUpdates(() => {
-      applyProfile();
-      renderProjects(store.getProjects());
-      syncFromCloud();
-    });
-  }
+    function requestFrame(index, highPriority = false) {
+      if (index < 0 || index >= FRAME_COUNT) return;
+      if (frames[index] !== null || loadingSet.has(index)) return;
 
-  window.addEventListener('focus', syncFromCloud);
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') syncFromCloud();
-  });
-
-  /* =========================================
-     6. Hover Text Recreate Engine (Zero Shift)
-     ========================================= */
-  const UPPER_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
-  const LOWER_CHARS = 'abcdefghijkmnpqrstuvwxyz';
-  const DIGIT_CHARS = '0123456789';
-
-  function runTextRecreate(targetText, onFrame, durationMs = 1100) {
-    const frameStepMs = 42;
-    const totalFrames = Math.max(14, Math.round(durationMs / frameStepMs));
-    let frame = 0;
-
-    const timer = setInterval(() => {
-      frame += 1;
-      const progress = frame / totalFrames;
-      const revealCount = Math.floor(progress * targetText.length);
-
-      const nextText = targetText
-        .split('')
-        .map((char, idx) => {
-          if (idx < revealCount) return char;
-          if (/[A-Z]/.test(char)) {
-            return UPPER_CHARS[Math.floor(Math.random() * UPPER_CHARS.length)];
-          }
-          if (/[a-z]/.test(char)) {
-            return LOWER_CHARS[Math.floor(Math.random() * LOWER_CHARS.length)];
-          }
-          if (/[0-9]/.test(char)) {
-            return DIGIT_CHARS[Math.floor(Math.random() * DIGIT_CHARS.length)];
-          }
-          return char;
-        })
-        .join('');
-
-      onFrame(nextText);
-
-      if (frame >= totalFrames) {
-        clearInterval(timer);
-        onFrame(targetText);
+      const existingPos = queue.indexOf(index);
+      if (existingPos !== -1) {
+        if (highPriority && existingPos > 0) {
+          queue.splice(existingPos, 1);
+          queue.unshift(index);
+        }
+        return;
       }
-    }, frameStepMs);
 
-    return () => clearInterval(timer);
-  }
+      if (highPriority) {
+        queue.unshift(index);
+      } else {
+        queue.push(index);
+      }
+      pumpQueue();
+    }
 
-  function initTextRecreate() {
-    const textEls = document.querySelectorAll('[data-recreate-text]');
-    textEls.forEach((el) => {
-      const original = el.textContent;
-      el.dataset.originalText = original;
+    function ensureNeighborhood(centerIdx, direction = 1) {
+      pruneQueue(centerIdx, 20);
+      cancelObsoleteRequests(centerIdx);
 
-      const wrap = document.createElement('span');
-      wrap.className = 'rewrite-wrap';
+      // Priority 1: Current frame
+      requestFrame(centerIdx, true);
 
-      const sizer = document.createElement('span');
-      sizer.className = 'rewrite-sizer';
-      sizer.setAttribute('aria-hidden', 'true');
-      sizer.textContent = original;
+      // Priority 2: Immediate adjacent frames
+      const forward1 = centerIdx + 1;
+      const backward1 = centerIdx - 1;
+      if (direction >= 0) {
+        if (forward1 < FRAME_COUNT) requestFrame(forward1, true);
+        if (backward1 >= 0) requestFrame(backward1, true);
+      } else {
+        if (backward1 >= 0) requestFrame(backward1, true);
+        if (forward1 < FRAME_COUNT) requestFrame(forward1, true);
+      }
 
-      const live = document.createElement('span');
-      live.className = 'rewrite-live';
-      live.textContent = original;
+      // Priority 3: Directional lookahead (wider buffer for rapid scroll jumps)
+      const lookahead = 18;
+      for (let offset = 2; offset <= lookahead; offset++) {
+        const primary = direction >= 0 ? centerIdx + offset : centerIdx - offset;
+        const secondary = direction >= 0 ? centerIdx - offset : centerIdx + offset;
+        if (primary >= 0 && primary < FRAME_COUNT) requestFrame(primary, false);
+        if (secondary >= 0 && secondary < FRAME_COUNT && offset <= 4) requestFrame(secondary, false);
+      }
+    }
 
-      wrap.append(sizer, live);
-      el.textContent = '';
-      el.appendChild(wrap);
-      el._liveNode = live;
-      el._stopTimer = null;
-    });
+    function preloadKeyframes() {
+      // Background load a sparse spine (every 10th frame) across all 238 frames
+      for (let i = 0; i < FRAME_COUNT; i += 10) {
+        requestFrame(i, false);
+      }
+      requestFrame(FRAME_COUNT - 1, false);
+    }
+
+    function updateLayoutCaches() {
+      maxScrollCache = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+      if (typeof NavigationController !== 'undefined' && NavigationController.trackedSections) {
+        cachedSectionOffsets = NavigationController.trackedSections.map((sec) => ({
+          id: sec.id,
+          top: sec.offsetTop,
+        }));
+      }
+    }
+
+    function scrollYToFrame(scrollY) {
+      const progress = Math.min(1, Math.max(0, (scrollY / maxScrollCache) * SCROLL_ANIM_PACE));
+      return progress * (FRAME_COUNT - 1);
+    }
+
+    function computeDrawRect(imgW, imgH) {
+      const isPortrait = height > width;
+
+      if (isPortrait) {
+        // Portrait (mobile phones and portrait tablets):
+        // Sizing to full viewport width displays 100% of character and atmospheric smoke
+        const scale = width / imgW;
+        const drawW = Math.round(imgW * scale);
+        const drawH = Math.round(imgH * scale);
+        const offsetX = 0;
+        const offsetY = Math.round((height - drawH) * 0.35);
+        const fadeH = Math.min(32, Math.round(drawH * 0.16));
+
+        return { offsetX, offsetY, drawW, drawH, isPortrait: true, fadeH };
+      }
+
+      // Landscape (desktop, 4K monitors, laptops, and rotated landscape phones)
+      const coverScale = Math.max(width / imgW, height / imgH);
+      const drawW = imgW * coverScale;
+      const drawH = imgH * coverScale;
+      const offsetX = (width - drawW) * 0.5;
+      const offsetY = (height - drawH) * 0.5;
+
+      return { offsetX, offsetY, drawW, drawH, isPortrait: false, fadeH: 0 };
+    }
+
+    function findNearestFrame(index) {
+      if (frames[index]) return index;
+      for (let offset = 1; offset < FRAME_COUNT; offset++) {
+        const prev = index - offset;
+        const next = index + offset;
+        if (prev >= 0 && frames[prev]) return prev;
+        if (next < FRAME_COUNT && frames[next]) return next;
+      }
+      return -1;
+    }
+
+    function renderFrame(position, force = false) {
+      const clamped = Math.min(FRAME_COUNT - 1, Math.max(0, position));
+      const targetIdx = Math.round(clamped);
+      if (!force && targetIdx === lastRenderedPos) return;
+
+      const resolvedBase = findNearestFrame(targetIdx);
+      if (resolvedBase === -1) return;
+
+      // Avoid redundant redraw if resolved fallback frame is already rendered
+      if (!force && resolvedBase === lastRenderedPos) return;
+
+      const baseImg = frames[resolvedBase];
+      if (!baseImg) return;
+
+      const rect = cachedDrawRect || computeDrawRect(decodeTargetW, decodeTargetH);
+      const { offsetX, offsetY, drawW, drawH, isPortrait, fadeH } = rect;
+
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#050308';
+      ctx.fillRect(0, 0, width, height);
+
+      // Draw crisp master frame — zero ghosting, zero double-edge blur
+      ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
+
+      // Soft edge feathering using pre-cached gradients (0 allocation)
+      if (isPortrait && cachedTopGrad && cachedBtmGrad && fadeH > 2) {
+        ctx.fillStyle = cachedTopGrad;
+        ctx.fillRect(offsetX, offsetY, drawW, fadeH);
+
+        ctx.fillStyle = cachedBtmGrad;
+        ctx.fillRect(offsetX, offsetY + drawH - fadeH, drawW, fadeH);
+      }
+
+      lastRenderedPos = resolvedBase;
+    }
+
+    function tick(timestamp) {
+      const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, 0.05) : 1 / 60;
+      lastTimestamp = timestamp;
+
+      if (scrollScheduled) {
+        scrollScheduled = false;
+        const newTarget = scrollYToFrame(pendingScrollY);
+        const diff = newTarget - targetFrame;
+        if (Math.abs(diff) > 0.01) {
+          lastScrollDirection = diff >= 0 ? 1 : -1;
+        }
+        targetFrame = newTarget;
+        if (typeof NavigationController !== 'undefined') {
+          NavigationController.updateHeaderAndNav(pendingScrollY, height, cachedSectionOffsets);
+        }
+        ensureNeighborhood(Math.round(targetFrame), lastScrollDirection);
+      }
+
+      const frameDelta = targetFrame - currentFrame;
+      const absDelta = Math.abs(frameDelta);
+
+      if (absDelta < 0.008) {
+        currentFrame = targetFrame;
+        renderFrame(currentFrame, needsRender);
+        needsRender = false;
+        rafId = null;
+        lastTimestamp = 0;
+        return;
+      }
+
+      // Dynamic adaptive easing: responsive when scrolling fast, silky smooth when scrolling slowly
+      const dynamicEase = absDelta > 6 ? 32 : (absDelta > 2 ? 26 : 22);
+      const factor = 1 - Math.exp(-dynamicEase * dt);
+
+      currentFrame += frameDelta * factor;
+      renderFrame(currentFrame);
+      needsRender = false;
+      rafId = requestAnimationFrame(tick);
+    }
+
+    function scheduleLoop() {
+      if (rafId === null) {
+        lastTimestamp = 0;
+        rafId = requestAnimationFrame(tick);
+      }
+    }
+
+    function onNativeScroll() {
+      pendingScrollY = window.scrollY;
+      scrollScheduled = true;
+      scheduleLoop();
+    }
+
+    function resize() {
+      width = window.innerWidth;
+      height = window.innerHeight;
+      updateLayoutCaches();
+
+      const rawDpr = window.devicePixelRatio || 1;
+      canvasScale = Math.min(rawDpr, 2);
+
+      const physicalW = Math.round(width * canvasScale);
+      const physicalH = Math.round(height * canvasScale);
+
+      const { isMob, isTablet } = DeviceProfile.detect();
+
+      // Dynamically tune cache capacity based on device capabilities
+      maxCachedFrames = isMob ? 140 : (isTablet ? 185 : 238);
+
+      let nextTargetW = 2560;
+      let nextTargetH = 1440;
+
+      if (isMob) {
+        if (physicalW <= 720 || width <= 390) {
+          nextTargetW = 1280;
+          nextTargetH = 720;
+        } else {
+          nextTargetW = 1600;
+          nextTargetH = 900;
+        }
+      } else if (isTablet) {
+        nextTargetW = 1920;
+        nextTargetH = 1080;
+      } else {
+        if (physicalW >= 2560 || width >= 1920) {
+          nextTargetW = 2560;
+          nextTargetH = 1440;
+        } else {
+          nextTargetW = 1920;
+          nextTargetH = 1080;
+        }
+      }
+
+      // If decoding resolution changed, immediately reclaim GPU memory and purge old bitmaps
+      const resolutionChanged = (nextTargetW !== decodeTargetW || nextTargetH !== decodeTargetH);
+      decodeTargetW = nextTargetW;
+      decodeTargetH = nextTargetH;
+
+      if (resolutionChanged) {
+        clearAllFrames();
+      }
+
+      // Resize canvas buffer only when physical dimensions change
+      const targetCanvasW = Math.max(1, physicalW);
+      const targetCanvasH = Math.max(1, physicalH);
+      if (canvas.width !== targetCanvasW || canvas.height !== targetCanvasH) {
+        canvas.width = targetCanvasW;
+        canvas.height = targetCanvasH;
+        ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+      }
+
+      cachedDrawRect = computeDrawRect(decodeTargetW, decodeTargetH);
+
+      if (cachedDrawRect.isPortrait && cachedDrawRect.fadeH > 2) {
+        const { offsetY, drawH, fadeH } = cachedDrawRect;
+        cachedTopGrad = ctx.createLinearGradient(0, offsetY, 0, offsetY + fadeH);
+        cachedTopGrad.addColorStop(0, '#050308');
+        cachedTopGrad.addColorStop(1, 'rgba(5, 3, 8, 0)');
+
+        cachedBtmGrad = ctx.createLinearGradient(0, offsetY + drawH - fadeH, 0, offsetY + drawH);
+        cachedBtmGrad.addColorStop(0, 'rgba(5, 3, 8, 0)');
+        cachedBtmGrad.addColorStop(1, '#050308');
+      } else {
+        cachedTopGrad = null;
+        cachedBtmGrad = null;
+      }
+
+      lastRenderedPos = -1;
+      renderFrame(currentFrame, true);
+      ensureNeighborhood(Math.round(currentFrame), 0);
+
+      const currentCardW = width <= 600 ? 160 : (width <= 768 ? 210 : 270);
+      if (typeof CarouselEngine !== 'undefined') {
+        CarouselEngine.handleBreakpointResize(currentCardW);
+      }
+    }
+
+    function init() {
+      targetFrame = scrollYToFrame(window.scrollY);
+      currentFrame = targetFrame;
+      resize();
+      preloadKeyframes();
+      ensureNeighborhood(Math.round(currentFrame), 1);
+    }
+
+    return {
+      init,
+      resize,
+      onNativeScroll,
+      updateLayoutCaches,
+      get currentFrame() { return currentFrame; },
+      get targetFrame() { return targetFrame; },
+      get cachedSectionOffsets() { return cachedSectionOffsets; },
+      get height() { return height; },
+    };
+  })();
+
+  /* ==========================================================================
+     MODULE 4: STICKY HEADER, SCROLL SPY & ACCESSIBLE MOBILE MENU
+     Manages navigation states with zero layout thrashing during scroll events
+     ========================================================================== */
+  const NavigationController = (() => {
+    const header = document.getElementById('site-header');
+    const navToggle = document.getElementById('nav-toggle');
+    const mobileMenu = document.getElementById('mobile-menu');
+    const navLinks = Array.from(document.querySelectorAll('#desktop-nav a[data-nav]'));
+    const trackedSections = ['home', 'about', 'skills', 'projects', 'services', 'contact']
+      .map((id) => document.getElementById(id))
+      .filter(Boolean);
+
+    let lastHeaderScrolled = false;
+    let lastActiveNavId = '';
+
+    function updateHeaderAndNav(scrollPos = window.scrollY, vpHeight = window.innerHeight, sectionOffsets = []) {
+      const scrolled = scrollPos > 24;
+      if (header && scrolled !== lastHeaderScrolled) {
+        lastHeaderScrolled = scrolled;
+        header.classList.toggle('is-scrolled', scrolled);
+      }
+
+      const probe = scrollPos + vpHeight * 0.35;
+      let activeId = 'home';
+      for (let i = 0; i < sectionOffsets.length; i++) {
+        if (probe >= sectionOffsets[i].top) {
+          activeId = sectionOffsets[i].id;
+        }
+      }
+
+      if (activeId !== lastActiveNavId) {
+        lastActiveNavId = activeId;
+        navLinks.forEach((link) => {
+          link.classList.toggle('is-active', link.dataset.nav === activeId);
+        });
+      }
+    }
+
+    function closeMobileMenu() {
+      if (!mobileMenu || !navToggle) return;
+      mobileMenu.hidden = true;
+      navToggle.setAttribute('aria-expanded', 'false');
+    }
+
+    function init() {
+      if (navToggle && mobileMenu) {
+        navToggle.addEventListener('click', () => {
+          const isExpanded = navToggle.getAttribute('aria-expanded') === 'true';
+          navToggle.setAttribute('aria-expanded', String(!isExpanded));
+          mobileMenu.hidden = isExpanded;
+        });
+
+        mobileMenu.querySelectorAll('.mobile-link').forEach((link) => {
+          link.addEventListener('click', closeMobileMenu);
+        });
+      }
+    }
+
+    return {
+      init,
+      closeMobileMenu,
+      updateHeaderAndNav,
+      get trackedSections() { return trackedSections; },
+    };
+  })();
+
+  /* ==========================================================================
+     MODULE 5: PROFILE DATA HYDRATION
+     Safely populates DOM profile placeholders with sanitized attributes
+     ========================================================================== */
+  const ProfileHydration = (() => {
+    const store = window.PortfolioStore;
+
+    function apply(profileData) {
+      if (!store) return;
+      const profile = profileData || store.getProfile();
+
+      document.querySelectorAll('[data-profile]').forEach((el) => {
+        const key = el.dataset.profile;
+        if (profile[key]) el.textContent = Security.sanitizeText(profile[key]);
+      });
+
+      document.querySelectorAll('[data-profile-multiline]').forEach((el) => {
+        const key = el.dataset.profileMultiline;
+        if (profile[key]) {
+          el.innerHTML = '';
+          const lines = String(profile[key]).split('\n');
+          lines.forEach((line, idx) => {
+            el.appendChild(document.createTextNode(line));
+            if (idx < lines.length - 1) el.appendChild(document.createElement('br'));
+          });
+        }
+      });
+
+      document.querySelectorAll('[data-profile-href]').forEach((el) => {
+        const key = el.dataset.profileHref;
+        const rawUrl = store.normalizeExternalUrl(profile[key]);
+        const safeUrl = Security.sanitizeUrl(rawUrl);
+        if (safeUrl) el.setAttribute('href', safeUrl);
+      });
+
+      document.querySelectorAll('[data-profile-mailto]').forEach((el) => {
+        const key = el.dataset.profileMailto;
+        const email = String(profile[key] || '').trim();
+        if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          el.setAttribute('href', `mailto:${encodeURIComponent(email)}`);
+        }
+      });
+
+      document.querySelectorAll('[data-profile-tel]').forEach((el) => {
+        const key = el.dataset.profileTel;
+        if (profile[key]) {
+          const cleanPhone = String(profile[key]).replace(/[^+\d]/g, '');
+          el.setAttribute('href', `tel:${cleanPhone}`);
+        }
+      });
+    }
+
+    return { apply };
+  })();
+
+  /* ==========================================================================
+     MODULE 6: 3D CYLINDER PROJECTS CAROUSEL & FILTER ENGINE
+     Features GPU-accelerated 3D mathematics, off-screen pausing, backface culling,
+     and fully sanitized card rendering.
+     ========================================================================== */
+  const CarouselEngine = (() => {
+    const store = window.PortfolioStore;
+    const categoryMenu = document.getElementById('category-menu');
+    const categorySelectBtn = document.getElementById('category-select-btn');
+    const catBtnLabel = document.getElementById('cat-btn-label');
+
+    const carouselStage = document.getElementById('carousel-stage');
+    const carouselCylinder = document.getElementById('carousel-cylinder');
+    const carouselPrevBtn = document.getElementById('carousel-prev-btn');
+    const carouselNextBtn = document.getElementById('carousel-next-btn');
+    const carouselDots = document.getElementById('carousel-dots');
+
+    let cachedProjects = store ? store.getProjects() : [];
+    let activeCategory = 'ALL';
+
+    // 3D Cylinder Carousel physics & animation state
+    let carouselItems = [];
+    let currentAngle = 0;
+    let targetAngle = 0;
+    let isDragging = false;
+    let dragStartX = 0;
+    let dragStartAngle = 0;
+    let isHovered = false;
+    const autoSpinSpeed = 0.16; // Naturally brisk, smooth 360° spin
+    let carouselRaf = null;
+    let slotCount = 1;
+    let slotAngleStep = 360;
+    let lastCylinderCardW = -1;
+    let cachedDotEls = [];
+    let lastClosestIndex = -1;
+    let isCarouselInView = false;
+    let carouselObserver = null;
+
+    function formatCategoryTitle(cat) {
+      if (cat === 'ALL') return 'All Categories';
+      return cat
+        .toLowerCase()
+        .split(' ')
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ');
+    }
+
+    function renderCategoryDropdown(categories, projects) {
+      if (!categoryMenu || !categorySelectBtn || !catBtnLabel) return;
+
+      categoryMenu.innerHTML = '';
+      categories.forEach((cat) => {
+        const count =
+          cat === 'ALL'
+            ? projects.length
+            : projects.filter(
+                (p) => String(p.category || '').trim().toUpperCase() === cat,
+              ).length;
+
+        const itemBtn = document.createElement('button');
+        itemBtn.type = 'button';
+        itemBtn.className = `category-item${cat === activeCategory ? ' is-active' : ''}`;
+        itemBtn.setAttribute('role', 'menuitem');
+
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = formatCategoryTitle(cat);
+
+        const countBadge = document.createElement('span');
+        countBadge.className = 'cat-count-badge';
+        countBadge.textContent = String(count);
+
+        itemBtn.appendChild(nameSpan);
+        itemBtn.appendChild(countBadge);
+
+        itemBtn.addEventListener('click', () => {
+          activeCategory = cat;
+          catBtnLabel.textContent = formatCategoryTitle(cat);
+          closeCategoryMenu();
+          renderProjects();
+        });
+
+        categoryMenu.appendChild(itemBtn);
+      });
+    }
+
+    function toggleCategoryMenu() {
+      if (!categoryMenu || !categorySelectBtn) return;
+      const isExpanded = categorySelectBtn.getAttribute('aria-expanded') === 'true';
+      categorySelectBtn.setAttribute('aria-expanded', String(!isExpanded));
+      categoryMenu.hidden = isExpanded;
+    }
+
+    function closeCategoryMenu() {
+      if (!categoryMenu || !categorySelectBtn) return;
+      categorySelectBtn.setAttribute('aria-expanded', 'false');
+      categoryMenu.hidden = true;
+    }
+
+    function updateCarouselPhysics() {
+      if (!isCarouselInView || !carouselCylinder || carouselItems.length === 0) {
+        carouselRaf = null;
+        return;
+      }
+
+      if (!isDragging && !isHovered && slotCount > 1) {
+        targetAngle -= autoSpinSpeed;
+      }
+
+      // Smooth elastic lerp towards target angle
+      const diff = targetAngle - currentAngle;
+      currentAngle += diff * 0.14;
+
+      carouselCylinder.style.transform = `rotateY(${currentAngle}deg)`;
+
+      const halfStep = slotAngleStep / 2;
+      let closestIndex = 0;
+      let minAngularDist = 999;
+
+      const itemCount = carouselItems.length;
+      for (let i = 0; i < itemCount; i++) {
+        const item = carouselItems[i];
+        // Calculate normalized angle relative to viewer (-180 to +180)
+        const rawTheta = (item.baseAngle + currentAngle) % 360;
+        const theta = ((rawTheta + 540) % 360) - 180;
+        const absTheta = Math.abs(theta);
+
+        const rad = (theta * Math.PI) / 180;
+        const cosVal = Math.cos(rad);
+
+        // Backface Culling: Cull cards completely facing away from viewer (cosVal < -0.05)
+        if (cosVal < -0.05) {
+          if (item.isVisible) {
+            item.el.style.visibility = 'hidden';
+            item.el.style.pointerEvents = 'none';
+            item.isVisible = false;
+          }
+          continue;
+        }
+
+        // Restore visibility if card was previously culled
+        if (!item.isVisible) {
+          item.el.style.visibility = '';
+          item.isVisible = true;
+        }
+
+        // Facing front: within half a step
+        const isFront = absTheta <= halfStep;
+        if (item.isActive !== isFront) {
+          item.isActive = isFront;
+          item.el.classList.toggle('is-active', isFront);
+          item.el.style.pointerEvents = isFront ? 'auto' : 'none';
+        }
+
+        if (absTheta < minAngularDist) {
+          minAngularDist = absTheta;
+          closestIndex = item.projectIndex;
+        }
+
+        // Smooth depth perspective: front card full opacity, back cards curve gracefully into depth
+        const depthOpacity = Math.round(Math.max(0.35, Math.min(1, 0.4 + 0.6 * cosVal)) * 100) / 100;
+        if (item.lastOpacity !== depthOpacity) {
+          item.lastOpacity = depthOpacity;
+          item.el.style.opacity = String(depthOpacity);
+        }
+      }
+
+      // Update pagination dots only when closestIndex changes
+      if (closestIndex !== lastClosestIndex && cachedDotEls.length > 0) {
+        if (lastClosestIndex >= 0 && cachedDotEls[lastClosestIndex]) {
+          cachedDotEls[lastClosestIndex].classList.remove('is-active');
+        }
+        if (cachedDotEls[closestIndex]) {
+          cachedDotEls[closestIndex].classList.add('is-active');
+        }
+        lastClosestIndex = closestIndex;
+      }
+
+      carouselRaf = requestAnimationFrame(updateCarouselPhysics);
+    }
+
+    function startCarouselLoop() {
+      if (carouselRaf === null && isCarouselInView) {
+        carouselRaf = requestAnimationFrame(updateCarouselPhysics);
+      }
+    }
+
+    function stopCarouselLoop() {
+      if (carouselRaf !== null) {
+        cancelAnimationFrame(carouselRaf);
+        carouselRaf = null;
+      }
+    }
+
+    function initVisibilityObserver() {
+      const container = document.getElementById('projects-carousel-container') || document.getElementById('projects');
+      if (!container) {
+        isCarouselInView = true;
+        startCarouselLoop();
+        return;
+      }
+
+      if ('IntersectionObserver' in window) {
+        if (carouselObserver) {
+          carouselObserver.disconnect();
+        }
+        carouselObserver = new IntersectionObserver(
+          (entries) => {
+            const entry = entries[0];
+            const inView = !!(entry && (entry.isIntersecting || entry.intersectionRatio > 0));
+            if (inView !== isCarouselInView) {
+              isCarouselInView = inView;
+              if (isCarouselInView) {
+                startCarouselLoop();
+              } else {
+                stopCarouselLoop();
+              }
+            }
+          },
+          {
+            root: null,
+            rootMargin: '150px 0px 150px 0px',
+            threshold: 0,
+          }
+        );
+        carouselObserver.observe(container);
+      } else {
+        isCarouselInView = true;
+        startCarouselLoop();
+      }
+    }
+
+    function rotateToProjectIndex(targetIdx) {
+      if (slotCount <= 1) return;
+      const item = carouselItems.find((it) => it.projectIndex === targetIdx);
+      if (!item) return;
+
+      const rawTheta = (item.baseAngle + targetAngle) % 360;
+      const theta = ((rawTheta + 540) % 360) - 180;
+      targetAngle -= theta;
+      if (isCarouselInView) {
+        startCarouselLoop();
+      }
+    }
+
+    function renderProjects(listOverride) {
+      if (!store || !carouselCylinder) return;
+      if (Array.isArray(listOverride)) {
+        cachedProjects = listOverride;
+      }
+
+      const projects = cachedProjects;
+
+      // Extract unique categories for filter menu
+      const categories = ['ALL'];
+      projects.forEach((p) => {
+        const cat = String(p.category || '').trim().toUpperCase();
+        if (cat && !categories.includes(cat)) categories.push(cat);
+      });
+
+      if (!categories.includes(activeCategory)) {
+        activeCategory = 'ALL';
+      }
+
+      renderCategoryDropdown(categories, projects);
+
+      const visible =
+        activeCategory === 'ALL'
+          ? projects
+          : projects.filter(
+              (p) => String(p.category || '').trim().toUpperCase() === activeCategory,
+            );
+
+      stopCarouselLoop();
+      carouselCylinder.innerHTML = '';
+      carouselItems = [];
+
+      if (visible.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'projects-empty';
+        empty.textContent = 'No projects published in this category yet.';
+        carouselCylinder.appendChild(empty);
+        if (carouselDots) carouselDots.innerHTML = '';
+        return;
+      }
+
+      // Determine circular slot repetition so the circle is continuous (min 4 slots for 3D orbit)
+      let slots = [];
+      if (visible.length >= 4) {
+        slots = visible.map((p, idx) => ({ project: p, projectIndex: idx }));
+      } else if (visible.length === 3) {
+        slots = [
+          ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
+          ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
+        ];
+      } else if (visible.length === 2) {
+        slots = [
+          ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
+          ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
+          ...visible.map((p, idx) => ({ project: p, projectIndex: idx })),
+        ];
+      } else {
+        slots = [{ project: visible[0], projectIndex: 0 }];
+      }
+
+      slotCount = slots.length;
+      slotAngleStep = 360 / slotCount;
+
+      // Radius calculation for 3D cylinder (compact, proportional for all screen sizes)
+      const isMobile = window.innerWidth <= 600;
+      const isTablet = window.innerWidth <= 768;
+      const cardWidth = isMobile ? 160 : isTablet ? 210 : 270;
+
+      let radius = 0;
+      if (slotCount >= 3) {
+        const radPerSlot = (Math.PI / slotCount);
+        const computedR = (cardWidth / 2) / Math.tan(radPerSlot);
+        radius = Math.max(isMobile ? 130 : (isTablet ? 180 : 220), Math.round(computedR + (isMobile ? 8 : 20)));
+      }
+
+      slots.forEach((slot, sIdx) => {
+        const baseAngle = sIdx * slotAngleStep;
+        const proj = slot.project || {};
+
+        const card = document.createElement('article');
+        card.className = 'carousel-card';
+        card.style.transform = `rotateY(${baseAngle}deg) translateZ(${radius}px)`;
+
+        // Sanitize dynamic inputs strictly before injection
+        const imgSrc = Security.sanitizeImageUrl(proj.image);
+        const imgAlt = Security.escapeHTML(proj.title || 'Project preview');
+        const categoryText = Security.escapeHTML(proj.category || 'PROJECT');
+        const indexNum = `#${String(slot.projectIndex + 1).padStart(2, '0')}`;
+        const titleText = Security.escapeHTML(proj.title || 'Untitled Project');
+        const descText = Security.escapeHTML(proj.description || '');
+
+        const rawHref = store.normalizeExternalUrl(proj.link);
+        const safeHref = Security.sanitizeUrl(rawHref);
+
+        const linkHtml = safeHref
+          ? `<a class="project-link" href="${Security.escapeHTML(safeHref)}" ${/^https?:\/\//i.test(safeHref) ? 'target="_blank" rel="noopener noreferrer"' : ''}><span>View Project</span><span aria-hidden="true">↗</span></a>`
+          : `<span class="project-link--muted">Case Study • Selected Work</span>`;
+
+        card.innerHTML = `
+          <div class="project-thumb">
+            <img src="${Security.escapeHTML(imgSrc)}" alt="${imgAlt}" loading="lazy">
+            <span class="project-badge">${categoryText}</span>
+            <span class="project-index">${indexNum}</span>
+          </div>
+          <div class="project-body">
+            <h3 class="project-title">${titleText}</h3>
+            <p class="project-desc">${descText}</p>
+            <div class="project-footer">
+              ${linkHtml}
+            </div>
+          </div>
+        `;
+
+        card.addEventListener('click', () => {
+          if (card.classList.contains('is-active')) return;
+          rotateToProjectIndex(slot.projectIndex);
+        });
+
+        carouselCylinder.appendChild(card);
+        carouselItems.push({
+          el: card,
+          baseAngle,
+          projectIndex: slot.projectIndex,
+          isActive: false,
+          isVisible: true,
+          lastOpacity: -1,
+        });
+      });
+
+      // Render pagination dots for each unique visible project
+      if (carouselDots) {
+        carouselDots.innerHTML = '';
+        visible.forEach((_, vIdx) => {
+          const dot = document.createElement('button');
+          dot.type = 'button';
+          dot.className = `carousel-dot${vIdx === 0 ? ' is-active' : ''}`;
+          dot.setAttribute('role', 'tab');
+          dot.setAttribute('aria-label', `Go to project ${vIdx + 1}`);
+          dot.addEventListener('click', () => {
+            rotateToProjectIndex(vIdx);
+          });
+          carouselDots.appendChild(dot);
+        });
+        cachedDotEls = Array.from(carouselDots.querySelectorAll('.carousel-dot'));
+      } else {
+        cachedDotEls = [];
+      }
+      lastClosestIndex = -1;
+
+      if (isCarouselInView) {
+        startCarouselLoop();
+      }
+      if (typeof ScrollCanvasEngine !== 'undefined' && ScrollCanvasEngine) {
+        ScrollCanvasEngine.updateLayoutCaches();
+        ScrollCanvasEngine.onNativeScroll();
+      }
+    }
+
+    function handleBreakpointResize(newCardW) {
+      if (lastCylinderCardW !== -1 && lastCylinderCardW !== newCardW) {
+        lastCylinderCardW = newCardW;
+        renderProjects();
+      } else {
+        lastCylinderCardW = newCardW;
+      }
+    }
+
+    function init() {
+      if (categorySelectBtn) {
+        categorySelectBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          toggleCategoryMenu();
+        });
+      }
+
+      document.addEventListener('click', (e) => {
+        if (
+          categoryMenu &&
+          !categoryMenu.hidden &&
+          !categoryMenu.contains(e.target) &&
+          categorySelectBtn &&
+          !categorySelectBtn.contains(e.target)
+        ) {
+          closeCategoryMenu();
+        }
+      });
+
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && categoryMenu && !categoryMenu.hidden) {
+          closeCategoryMenu();
+        }
+      });
+
+      if (carouselPrevBtn) {
+        carouselPrevBtn.addEventListener('click', () => {
+          targetAngle += slotAngleStep;
+          if (isCarouselInView) startCarouselLoop();
+        });
+      }
+
+      if (carouselNextBtn) {
+        carouselNextBtn.addEventListener('click', () => {
+          targetAngle -= slotAngleStep;
+          if (isCarouselInView) startCarouselLoop();
+        });
+      }
+
+      if (carouselStage) {
+        carouselStage.addEventListener('pointerenter', () => {
+          isHovered = true;
+        });
+
+        carouselStage.addEventListener('pointerleave', () => {
+          isHovered = false;
+          if (isDragging) {
+            isDragging = false;
+            carouselStage.classList.remove('is-dragging');
+            targetAngle = Math.round(targetAngle / slotAngleStep) * slotAngleStep;
+          }
+        });
+
+        carouselStage.addEventListener('pointerdown', (e) => {
+          if (slotCount <= 1) return;
+          isDragging = true;
+          dragStartX = e.clientX;
+          dragStartAngle = targetAngle;
+          carouselStage.classList.add('is-dragging');
+        });
+
+        window.addEventListener('pointermove', (e) => {
+          if (!isDragging) return;
+          const deltaX = e.clientX - dragStartX;
+          targetAngle = dragStartAngle + deltaX * 0.42;
+        });
+
+        window.addEventListener('pointerup', () => {
+          if (!isDragging) return;
+          isDragging = false;
+          if (carouselStage) carouselStage.classList.remove('is-dragging');
+          targetAngle = Math.round(targetAngle / slotAngleStep) * slotAngleStep;
+        });
+
+        window.addEventListener('pointercancel', () => {
+          if (!isDragging) return;
+          isDragging = false;
+          if (carouselStage) carouselStage.classList.remove('is-dragging');
+          targetAngle = Math.round(targetAngle / slotAngleStep) * slotAngleStep;
+        });
+      }
+
+      initVisibilityObserver();
+    }
+
+    return {
+      init,
+      renderProjects,
+      handleBreakpointResize,
+      initVisibilityObserver,
+    };
+  })();
+
+  /* ==========================================================================
+     MODULE 7: CONTACT INQUIRY MODAL, TOASTS & LOGO ADMIN ACCESS
+     Handles visitor inquiries, feedback messages, and hidden authentication
+     ========================================================================== */
+  const InquiryController = (() => {
+    const store = window.PortfolioStore;
+    const modal = document.getElementById('contact-modal');
+    const modalClose = document.getElementById('modal-close');
+    const inquiryForm = document.getElementById('inquiry-form');
+    const serviceSelect = document.getElementById('inq-service');
+    const toastStack = document.getElementById('toast-stack');
+
+    function showToast(message) {
+      if (!toastStack) return;
+      const item = document.createElement('div');
+      item.className = 'toast';
+      item.textContent = Security.sanitizeText(message);
+      toastStack.appendChild(item);
+      setTimeout(() => item.remove(), 3600);
+    }
+
+    function openContactModal(serviceName) {
+      if (typeof NavigationController !== 'undefined') {
+        NavigationController.closeMobileMenu();
+      }
+      if (!modal) return;
+      if (serviceName && serviceSelect) {
+        const hasOpt = Array.from(serviceSelect.options).some((o) => o.value === serviceName);
+        if (hasOpt) serviceSelect.value = serviceName;
+      }
+      modal.hidden = false;
+      const nameInput = document.getElementById('inq-name');
+      if (nameInput) nameInput.focus();
+    }
+
+    function closeContactModal() {
+      if (!modal) return;
+      modal.hidden = true;
+    }
+
+    function bindLogoAdminToggle(wrapId, triggerId, linkId) {
+      const wrap = document.getElementById(wrapId);
+      const trigger = document.getElementById(triggerId);
+      const link = document.getElementById(linkId);
+      if (!wrap || !trigger || !link) return;
+
+      trigger.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const revealed = wrap.classList.toggle('is-revealed');
+        trigger.setAttribute('aria-expanded', String(revealed));
+        link.setAttribute('tabindex', revealed ? '0' : '-1');
+      });
+
+      document.addEventListener('click', (e) => {
+        if (!wrap.contains(e.target) && wrap.classList.contains('is-revealed')) {
+          wrap.classList.remove('is-revealed');
+          trigger.setAttribute('aria-expanded', 'false');
+          link.setAttribute('tabindex', '-1');
+        }
+      });
+    }
+
+    function init() {
+      document.querySelectorAll('[data-open-contact]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          openContactModal(btn.dataset.openContact || '');
+        });
+        if (btn.getAttribute('role') === 'button') {
+          btn.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              openContactModal(btn.dataset.openContact || '');
+            }
+          });
+        }
+      });
+
+      if (modalClose) {
+        modalClose.addEventListener('click', closeContactModal);
+      }
+
+      if (modal) {
+        modal.addEventListener('click', (e) => {
+          if (e.target === modal) closeContactModal();
+        });
+      }
+
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          closeContactModal();
+          if (typeof NavigationController !== 'undefined') {
+            NavigationController.closeMobileMenu();
+          }
+        }
+      });
+
+      if (inquiryForm) {
+        inquiryForm.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const nameInput = document.getElementById('inq-name');
+          const emailInput = document.getElementById('inq-email');
+          const detailsInput = document.getElementById('inq-details');
+
+          const name = nameInput ? Security.sanitizeText(nameInput.value) : '';
+          const email = emailInput ? Security.sanitizeText(emailInput.value) : '';
+          const service = serviceSelect ? serviceSelect.value : '';
+          const details = detailsInput ? Security.sanitizeText(detailsInput.value) : '';
+
+          if (!name || !email || !details) return;
+          const submitBtn = inquiryForm.querySelector('button[type="submit"]');
+          if (submitBtn) submitBtn.disabled = true;
+
+          try {
+            if (store) {
+              await store.addInquiry({ name, email, service, details });
+            }
+            inquiryForm.reset();
+            closeContactModal();
+            showToast('Inquiry received! Hamood will respond shortly.');
+          } finally {
+            if (submitBtn) submitBtn.disabled = false;
+          }
+        });
+      }
+
+      // Hidden Admin Lock tucked behind footer HS logo
+      bindLogoAdminToggle('footer-logo-wrap', 'admin-lock-trigger', 'footer-admin-link');
+    }
+
+    return {
+      init,
+      showToast,
+      openContactModal,
+      closeContactModal,
+    };
+  })();
+
+  /* ==========================================================================
+     MODULE 8: CLIPBOARD & CLOUD DATA SYNCHRONIZATION
+     Provides instant phone copying for desktop users and multi-tab state sync
+     ========================================================================== */
+  const SyncAndClipboard = (() => {
+    const store = window.PortfolioStore;
+
+    function fallbackCopy(text) {
+      const temp = document.createElement('textarea');
+      temp.value = text;
+      temp.setAttribute('readonly', '');
+      temp.style.position = 'absolute';
+      temp.style.left = '-9999px';
+      document.body.appendChild(temp);
+      temp.select();
+      document.execCommand('copy');
+      temp.remove();
+    }
+
+    function initClipboard() {
+      const phoneCard = document.querySelector('[data-profile-tel="phone"]');
+      if (!phoneCard) return;
+
+      phoneCard.addEventListener('click', (e) => {
+        const isMobile =
+          /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+          ('ontouchstart' in window && window.innerWidth <= 768);
+
+        if (!isMobile) {
+          // Laptop / Desktop: copy phone number to clipboard instantly
+          e.preventDefault();
+          const phoneValEl = phoneCard.querySelector('[data-profile="phone"]');
+          const rawPhone = phoneValEl ? phoneValEl.textContent.trim() : '+92 343 6956890';
+
+          const notifySuccess = () => {
+            InquiryController.showToast(`Phone number copied to clipboard: ${rawPhone}`);
+            phoneCard.classList.add('is-copied');
+            setTimeout(() => phoneCard.classList.remove('is-copied'), 2200);
+          };
+
+          if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            navigator.clipboard.writeText(rawPhone).then(notifySuccess, () => {
+              fallbackCopy(rawPhone);
+              notifySuccess();
+            });
+          } else {
+            fallbackCopy(rawPhone);
+            notifySuccess();
+          }
+        }
+      });
+    }
+
+    let cloudSyncInFlight = false;
+    async function syncFromCloud() {
+      if (!store || cloudSyncInFlight) return;
+      cloudSyncInFlight = true;
+      try {
+        const [{ profile }, { projects }] = await Promise.all([
+          store.fetchProfile(),
+          store.fetchProjects(),
+        ]);
+        if (profile) ProfileHydration.apply(profile);
+        if (Array.isArray(projects)) {
+          CarouselEngine.renderProjects(projects);
+        }
+      } catch {
+        // Fallback gracefully to offline cache
+      } finally {
+        cloudSyncInFlight = false;
+      }
+    }
+
+    function initSync() {
+      if (store && typeof store.subscribeToLiveUpdates === 'function') {
+        store.subscribeToLiveUpdates(() => {
+          ProfileHydration.apply();
+          CarouselEngine.renderProjects(store.getProjects());
+          syncFromCloud();
+        });
+      }
+
+      window.addEventListener('focus', syncFromCloud);
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') syncFromCloud();
+      });
+    }
+
+    return {
+      init() {
+        initClipboard();
+        initSync();
+      },
+      syncFromCloud,
+    };
+  })();
+
+  /* ==========================================================================
+     MODULE 9: INTERACTIVE TEXT RE-CREATION ON HOVER
+     Digital cyber scramble typography effect with guaranteed timer cleanup
+     ========================================================================== */
+  const TextRecreationEngine = (() => {
+    const UPPER_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    const LOWER_CHARS = 'abcdefghijklmnopqrstuvwxyz';
+    const DIGIT_CHARS = '0123456789';
+
+    function runTextRecreate(targetText, onFrame, durationMs = 1100) {
+      const frameStepMs = 42;
+      const totalFrames = Math.max(14, Math.round(durationMs / frameStepMs));
+      let frame = 0;
+
+      const timer = setInterval(() => {
+        frame += 1;
+        const progress = frame / totalFrames;
+        const revealCount = Math.floor(progress * targetText.length);
+
+        const nextText = targetText
+          .split('')
+          .map((char, idx) => {
+            if (idx < revealCount) return char;
+            if (/[A-Z]/.test(char)) {
+              return UPPER_CHARS[Math.floor(Math.random() * UPPER_CHARS.length)];
+            }
+            if (/[a-z]/.test(char)) {
+              return LOWER_CHARS[Math.floor(Math.random() * LOWER_CHARS.length)];
+            }
+            if (/[0-9]/.test(char)) {
+              return DIGIT_CHARS[Math.floor(Math.random() * DIGIT_CHARS.length)];
+            }
+            return char;
+          })
+          .join('');
+
+        onFrame(nextText);
+
+        if (frame >= totalFrames) {
+          clearInterval(timer);
+          onFrame(targetText);
+        }
+      }, frameStepMs);
+
+      return () => clearInterval(timer);
+    }
 
     function restartClass(node, className) {
       node.classList.remove(className);
-      void node.offsetWidth;
+      void node.offsetWidth; // Force reflow for CSS keyframe restart
       node.classList.add(className);
     }
 
-    document.querySelectorAll('[data-recreate-card]').forEach((card) => {
-      card.addEventListener('mouseenter', () => {
-        card.querySelectorAll('[data-recreate-text]').forEach((el) => {
-          const original = el.dataset.originalText || '';
-          const live = el._liveNode;
-          if (!live || !original) return;
-          if (typeof el._stopTimer === 'function') el._stopTimer();
+    function init() {
+      const textEls = document.querySelectorAll('[data-recreate-text]');
+      textEls.forEach((el) => {
+        const original = el.textContent;
+        el.dataset.originalText = original;
 
-          restartClass(live, 'recreate-glow');
-          const duration = Number(el.dataset.duration) || 1100;
-          el._stopTimer = runTextRecreate(
-            original,
-            (next) => {
-              live.textContent = next;
-            },
-            duration,
-          );
-        });
+        const wrap = document.createElement('span');
+        wrap.className = 'rewrite-wrap';
 
-        card.querySelectorAll('[data-recreate-wipe]').forEach((el) => {
-          restartClass(el, 'recreate-wipe');
-        });
+        const sizer = document.createElement('span');
+        sizer.className = 'rewrite-sizer';
+        sizer.setAttribute('aria-hidden', 'true');
+        sizer.textContent = original;
 
-        card.querySelectorAll('[data-recreate-wipe-tags]').forEach((el) => {
-          restartClass(el, 'recreate-wipe-delay');
+        const live = document.createElement('span');
+        live.className = 'rewrite-live';
+        live.textContent = original;
+
+        wrap.append(sizer, live);
+        el.textContent = '';
+        el.appendChild(wrap);
+        el._liveNode = live;
+        el._stopTimer = null;
+      });
+
+      document.querySelectorAll('[data-recreate-card]').forEach((card) => {
+        card.addEventListener('mouseenter', () => {
+          card.querySelectorAll('[data-recreate-text]').forEach((el) => {
+            const original = el.dataset.originalText || '';
+            const live = el._liveNode;
+            if (!live || !original) return;
+            if (typeof el._stopTimer === 'function') el._stopTimer();
+
+            restartClass(live, 'recreate-glow');
+            const duration = Number(el.dataset.duration) || 1100;
+            el._stopTimer = runTextRecreate(
+              original,
+              (next) => {
+                live.textContent = next;
+              },
+              duration,
+            );
+          });
+
+          card.querySelectorAll('[data-recreate-wipe]').forEach((el) => {
+            restartClass(el, 'recreate-wipe');
+          });
         });
       });
-    });
+    }
+
+    return { init };
+  })();
+
+  /* ==========================================================================
+     MODULE 10: CINEMATIC PAGE INTRO
+     Two-panel shutter reveal choreography on first load
+     ========================================================================== */
+  const PageIntro = (() => {
+    function run() {
+      const intro = document.getElementById('page-intro');
+      if (!intro) return;
+
+      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (reduceMotion) {
+        intro.remove();
+        return;
+      }
+
+      const finish = () => {
+        intro.classList.add('is-done');
+        setTimeout(() => intro.remove(), 400);
+      };
+
+      const startReveal = () => {
+        if (intro.classList.contains('is-leaving')) return;
+        intro.classList.add('is-leaving');
+        setTimeout(finish, 780);
+      };
+
+      // Brief sleek black blink (~420ms) then smoothly part curtains to reveal portfolio
+      setTimeout(startReveal, 420);
+    }
+
+    return { run };
+  })();
+
+  /* ==========================================================================
+     MODULE 11: APPLICATION BOOTSTRAP & ORCHESTRATION
+     Initializes subsystems in deterministic sequence with zero global pollution
+     ========================================================================== */
+  function bootstrap() {
+    PageIntro.run();
+    ProfileHydration.apply();
+    NavigationController.init();
+    InquiryController.init();
+    SyncAndClipboard.init();
+    TextRecreationEngine.init();
+
+    if (ScrollCanvasEngine) {
+      ScrollCanvasEngine.init();
+      window.addEventListener('scroll', ScrollCanvasEngine.onNativeScroll, { passive: true });
+      window.addEventListener('resize', ScrollCanvasEngine.resize, { passive: true });
+      window.addEventListener(
+        'load',
+        () => {
+          ScrollCanvasEngine.updateLayoutCaches();
+          ScrollCanvasEngine.onNativeScroll();
+        },
+        { passive: true },
+      );
+    }
+
+    CarouselEngine.init();
+    CarouselEngine.renderProjects();
+    SyncAndClipboard.syncFromCloud();
   }
 
-  /* =========================================
-     7. Full-Screen Opening Curtain Trigger
-     ========================================= */
-  function runPageIntro() {
-    const intro = document.getElementById('page-intro');
-    if (!intro) return;
-
-    const finish = () => {
-      intro.classList.add('is-done');
-    };
-
-    const startReveal = () => {
-      if (intro.classList.contains('is-leaving')) return;
-      intro.classList.add('is-leaving');
-      setTimeout(finish, 780);
-    };
-
-    // Brief sleek black blink (~420ms) then smoothly part curtains to reveal portfolio
-    setTimeout(startReveal, 420);
+  // Execute bootstrap on DOM readiness
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootstrap);
+  } else {
+    bootstrap();
   }
-
-  /* =========================================
-     8. Boot
-     ========================================= */
-  runPageIntro();
-  applyProfile();
-  renderProjects();
-  initCarouselVisibilityObserver();
-  initTextRecreate();
-  syncFromCloud();
-
-  targetFrame = scrollYToFrame(window.scrollY);
-  currentFrame = targetFrame;
-
-  resize();
-  preloadKeyframes();
-  ensureNeighborhood(Math.round(currentFrame), 1);
-  updateHeaderAndNav();
-
-  window.addEventListener('scroll', onNativeScroll, { passive: true });
-  window.addEventListener('resize', resize, { passive: true });
-  window.addEventListener(
-    'load',
-    () => {
-      updateLayoutCaches();
-      onNativeScroll();
-    },
-    { passive: true },
-  );
 })();
