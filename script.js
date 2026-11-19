@@ -1,9 +1,8 @@
 (() => {
   /* =========================================
-     1. Native-Speed 4K Ultra HD Scroll Canvas Engine
+     1. High-Performance Adaptive Scroll Canvas Engine
      ========================================= */
   const FRAME_COUNT = 238;
-  const FRAME_EASE = 24;
   const SCROLL_ANIM_PACE = 2.1;
   const USE_BITMAP =
     window.location.protocol !== 'file:' && typeof window.createImageBitmap === 'function';
@@ -11,14 +10,21 @@
   const canvas = document.getElementById('scroll-canvas');
   const ctx = canvas.getContext('2d', { alpha: false });
 
-  // Permanently pinned device-matched ImageBitmaps — zero eviction, zero scroll decode
+  // Intelligent sliding cache with resource release (.close())
   const frames = new Array(FRAME_COUNT).fill(null);
+  const loadingSet = new Set();
+  const queue = [];
+  const CONCURRENCY = 4;
+  let activeWorkers = 0;
+  let maxCachedFrames = 36; // dynamically tuned: 28 on mobile, 38 on tablet, 52 on desktop
+  let cachedCount = 0;
 
   let width = 0;
   let height = 0;
   let canvasScale = 1;
   let decodeTargetW = 3840;
   let decodeTargetH = 2160;
+  let cachedDrawRect = null;
   let maxScrollCache = 1;
   let cachedSectionOffsets = [];
 
@@ -27,17 +33,39 @@
   let lastRenderedPos = -1;
   let rafId = null;
   let lastTimestamp = 0;
+  let pendingScrollY = 0;
+  let scrollScheduled = false;
+  let lastScrollDirection = 1; // 1 = scrolling down, -1 = scrolling up
 
   function frameSrc(index) {
     return `./frames/frame-${String(index + 1).padStart(3, '0')}.webp`;
   }
 
+  function detectDevice() {
+    const ua = navigator.userAgent || '';
+    const isMobileUA = /Android|webOS|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+    const isTabletUA =
+      /iPad/i.test(ua) ||
+      (navigator.maxTouchPoints > 1 && Math.min(window.screen.width, window.screen.height) >= 600);
+    const isSmallScreen =
+      window.innerWidth <= 768 || Math.min(window.screen.width, window.screen.height) <= 600;
+    const isMob = isMobileUA || (isSmallScreen && !isTabletUA);
+    const isTablet =
+      isTabletUA ||
+      (!isMob &&
+        window.innerWidth <= 1024 &&
+        (navigator.maxTouchPoints > 1 || window.innerHeight > window.innerWidth));
+    return { isMob, isTablet };
+  }
+
   function updateLayoutCaches() {
     maxScrollCache = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
-    cachedSectionOffsets = trackedSections.map((sec) => ({
-      id: sec.id,
-      top: sec.offsetTop,
-    }));
+    if (typeof trackedSections !== 'undefined' && Array.isArray(trackedSections)) {
+      cachedSectionOffsets = trackedSections.map((sec) => ({
+        id: sec.id,
+        top: sec.offsetTop,
+      }));
+    }
   }
 
   function scrollYToFrame(scrollY) {
@@ -45,51 +73,7 @@
     return progress * (FRAME_COUNT - 1);
   }
 
-  function resize() {
-    width = window.innerWidth;
-    height = window.innerHeight;
-    updateLayoutCaches();
-
-    const rawDpr = window.devicePixelRatio || 1;
-    // On 4K / 32-inch displays (and Retina displays), scale up to native 2x for razor-sharp pixel fidelity
-    canvasScale = Math.min(rawDpr, 2);
-
-    canvas.width = Math.max(1, Math.round(width * canvasScale));
-    canvas.height = Math.max(1, Math.round(height * canvasScale));
-
-    const physicalW = Math.round(width * canvasScale);
-    const physicalH = Math.round(height * canvasScale);
-
-    const isPortrait = height > width;
-
-    // Device-tuned bitmap sizing:
-    // Full 4K (3840x2160) for 4K / 32-inch desktop monitors (physical width >= 2560)
-    // 2560x1440 for QHD desktop displays and large tablets
-    // 1920x1080 for standard laptops and high-density mobile phones (ultra-sharp, zero stutter)
-    // 1280x720 for compact mobile phones (instant, lightweight 60-120fps)
-    if (!isPortrait && (physicalW >= 2560 || width >= 1920)) {
-      decodeTargetW = 3840;
-      decodeTargetH = 2160;
-    } else if (!isPortrait && (physicalW >= 1440 || width >= 1200)) {
-      decodeTargetW = 2560;
-      decodeTargetH = 1440;
-    } else if (width >= 768 || physicalW >= 720 || physicalH >= 1280) {
-      decodeTargetW = 1920;
-      decodeTargetH = 1080;
-    } else {
-      decodeTargetW = 1280;
-      decodeTargetH = 720;
-    }
-
-    ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-
-    lastRenderedPos = -1;
-    renderFrame(currentFrame, true);
-  }
-
-  function computeDrawRect(imgW, imgH, framePos) {
+  function computeDrawRect(imgW, imgH) {
     const isPortrait = height > width;
 
     if (isPortrait) {
@@ -100,10 +84,10 @@
       const drawW = Math.round(imgW * scale);
       const drawH = Math.round(imgH * scale);
       const offsetX = 0;
-      // Position naturally in the upper-middle hero area behind the hero title and profile summary
       const offsetY = Math.round((height - drawH) * 0.35);
+      const fadeH = Math.min(32, Math.round(drawH * 0.16));
 
-      return { offsetX, offsetY, drawW, drawH, isPortrait: true };
+      return { offsetX, offsetY, drawW, drawH, isPortrait: true, fadeH };
     }
 
     // Landscape (desktop, 4K monitors, laptops, and rotated landscape phones):
@@ -113,14 +97,99 @@
     const offsetX = (width - drawW) * 0.5;
     const offsetY = (height - drawH) * 0.5;
 
-    return { offsetX, offsetY, drawW, drawH, isPortrait: false };
+    return { offsetX, offsetY, drawW, drawH, isPortrait: false, fadeH: 0 };
+  }
+
+  function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    updateLayoutCaches();
+
+    const rawDpr = window.devicePixelRatio || 1;
+    canvasScale = Math.min(rawDpr, 2);
+
+    const physicalW = Math.round(width * canvasScale);
+    const physicalH = Math.round(height * canvasScale);
+
+    const { isMob, isTablet } = detectDevice();
+
+    // Dynamically tune cache capacity based on device capabilities
+    maxCachedFrames = isMob ? 28 : (isTablet ? 38 : 52);
+
+    let nextTargetW = 3840;
+    let nextTargetH = 2160;
+
+    if (isMob) {
+      // Mobile: 1280x720 for compact screens, 1920x1080 for high-density Retina phones
+      if (physicalW <= 720 || width <= 390) {
+        nextTargetW = 1280;
+        nextTargetH = 720;
+      } else {
+        nextTargetW = 1920;
+        nextTargetH = 1080;
+      }
+    } else if (isTablet) {
+      // Tablet: 1920x1080 or 2560x1440
+      nextTargetW = physicalW >= 1500 ? 2560 : 1920;
+      nextTargetH = physicalW >= 1500 ? 1440 : 1080;
+    } else {
+      // Desktop: Full 4K (3840x2160) for 4K / QHD monitors, 2560x1440 for standard laptops
+      if (physicalW >= 2560 || width >= 1920) {
+        nextTargetW = 3840;
+        nextTargetH = 2160;
+      } else if (physicalW >= 1440 || width >= 1200) {
+        nextTargetW = 2560;
+        nextTargetH = 1440;
+      } else {
+        nextTargetW = 1920;
+        nextTargetH = 1080;
+      }
+    }
+
+    // If decoding resolution changed, safely release and close previous ImageBitmaps
+    const resolutionChanged = (nextTargetW !== decodeTargetW || nextTargetH !== decodeTargetH);
+    decodeTargetW = nextTargetW;
+    decodeTargetH = nextTargetH;
+
+    if (resolutionChanged) {
+      for (let i = 0; i < FRAME_COUNT; i++) {
+        if (frames[i] && typeof frames[i].close === 'function') {
+          frames[i].close();
+        }
+        frames[i] = null;
+      }
+      cachedCount = 0;
+      loadingSet.clear();
+      queue.length = 0;
+    }
+
+    // Resize canvas physical buffer only when dimensions or scale actually change
+    const targetCanvasW = Math.max(1, physicalW);
+    const targetCanvasH = Math.max(1, physicalH);
+    if (canvas.width !== targetCanvasW || canvas.height !== targetCanvasH) {
+      canvas.width = targetCanvasW;
+      canvas.height = targetCanvasH;
+      ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+    }
+
+    // Cache precomputed draw rectangle (avoids repeating layout math on every render)
+    cachedDrawRect = computeDrawRect(decodeTargetW, decodeTargetH);
+
+    lastRenderedPos = -1;
+    renderFrame(currentFrame, true);
+    ensureNeighborhood(Math.round(currentFrame), 0);
   }
 
   function findNearestFrame(index) {
     if (frames[index]) return index;
+    // Check nearest neighbors outward
     for (let offset = 1; offset < FRAME_COUNT; offset++) {
-      if (index - offset >= 0 && frames[index - offset]) return index - offset;
-      if (index + offset < FRAME_COUNT && frames[index + offset]) return index + offset;
+      const prev = index - offset;
+      const next = index + offset;
+      if (prev >= 0 && frames[prev]) return prev;
+      if (next < FRAME_COUNT && frames[next]) return next;
     }
     return -1;
   }
@@ -133,46 +202,227 @@
     const resolvedBase = findNearestFrame(targetIdx);
     if (resolvedBase === -1) return;
 
-    const baseImg = frames[resolvedBase];
-    const imgW = baseImg.naturalWidth || baseImg.width;
-    const imgH = baseImg.naturalHeight || baseImg.height;
-    if (!imgW || !imgH) return;
+    // Avoid redundant redraw if the resolved fallback frame is already rendered
+    if (!force && resolvedBase === lastRenderedPos) return;
 
-    const { offsetX, offsetY, drawW, drawH, isPortrait } = computeDrawRect(imgW, imgH, clamped);
+    const baseImg = frames[resolvedBase];
+    if (!baseImg) return;
+
+    const rect = cachedDrawRect || computeDrawRect(decodeTargetW, decodeTargetH);
+    const { offsetX, offsetY, drawW, drawH, isPortrait, fadeH } = rect;
 
     ctx.globalAlpha = 1;
     ctx.fillStyle = '#050308';
     ctx.fillRect(0, 0, width, height);
-    // Draw 100% crisp single master frame — zero ghosting, zero double-edge blur
+
+    // Draw crisp single master frame — zero ghosting, zero double-edge blur
     ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
 
     // On portrait mobile screens, softly feather top and bottom edges into the deep #050308 background
-    if (isPortrait) {
-      const fadeH = Math.min(32, Math.round(drawH * 0.16));
-      if (fadeH > 2) {
-        const topGrad = ctx.createLinearGradient(0, offsetY, 0, offsetY + fadeH);
-        topGrad.addColorStop(0, '#050308');
-        topGrad.addColorStop(1, 'rgba(5, 3, 8, 0)');
-        ctx.fillStyle = topGrad;
-        ctx.fillRect(offsetX, offsetY, drawW, fadeH);
+    if (isPortrait && fadeH > 2) {
+      const topGrad = ctx.createLinearGradient(0, offsetY, 0, offsetY + fadeH);
+      topGrad.addColorStop(0, '#050308');
+      topGrad.addColorStop(1, 'rgba(5, 3, 8, 0)');
+      ctx.fillStyle = topGrad;
+      ctx.fillRect(offsetX, offsetY, drawW, fadeH);
 
-        const btmGrad = ctx.createLinearGradient(0, offsetY + drawH - fadeH, 0, offsetY + drawH);
-        btmGrad.addColorStop(0, 'rgba(5, 3, 8, 0)');
-        btmGrad.addColorStop(1, '#050308');
-        ctx.fillStyle = btmGrad;
-        ctx.fillRect(offsetX, offsetY + drawH - fadeH, drawW, fadeH);
+      const btmGrad = ctx.createLinearGradient(0, offsetY + drawH - fadeH, 0, offsetY + drawH);
+      btmGrad.addColorStop(0, 'rgba(5, 3, 8, 0)');
+      btmGrad.addColorStop(1, '#050308');
+      ctx.fillStyle = btmGrad;
+      ctx.fillRect(offsetX, offsetY + drawH - fadeH, drawW, fadeH);
+    }
+
+    lastRenderedPos = resolvedBase;
+  }
+
+  function evictExcessFrames(centerIdx) {
+    if (cachedCount <= maxCachedFrames) return;
+
+    const SAFE_RADIUS = 8;
+    let furthestIdx = -1;
+    let maxDist = -1;
+
+    for (let i = 0; i < FRAME_COUNT; i++) {
+      if (frames[i] !== null) {
+        const dist = Math.abs(i - centerIdx);
+        // Do not evict frames in the immediate safe radius around the current frame
+        if (dist > SAFE_RADIUS && dist > maxDist) {
+          maxDist = dist;
+          furthestIdx = i;
+        }
       }
     }
 
-    lastRenderedPos = targetIdx;
+    if (furthestIdx !== -1) {
+      const evicted = frames[furthestIdx];
+      if (evicted && typeof evicted.close === 'function') {
+        evicted.close(); // Immediate GPU memory reclamation!
+      }
+      frames[furthestIdx] = null;
+      cachedCount = Math.max(0, cachedCount - 1);
+    }
+  }
+
+  function decodeFrame(index) {
+    if (index < 0 || index >= FRAME_COUNT) return Promise.resolve(null);
+    if (frames[index] !== null) return Promise.resolve(frames[index]);
+    if (loadingSet.has(index)) return Promise.resolve(null);
+
+    loadingSet.add(index);
+
+    if (USE_BITMAP) {
+      const resizeOpts =
+        decodeTargetW < 3840 && typeof createImageBitmap === 'function'
+          ? {
+              resizeWidth: decodeTargetW,
+              resizeHeight: decodeTargetH,
+              resizeQuality: 'high',
+            }
+          : undefined;
+
+      return fetch(frameSrc(index))
+        .then((res) => (res.ok ? res.blob() : null))
+        .then((blob) => {
+          if (!blob) return null;
+          if (resizeOpts) {
+            return createImageBitmap(blob, resizeOpts).catch(() => createImageBitmap(blob));
+          }
+          return createImageBitmap(blob);
+        })
+        .then((bm) => {
+          loadingSet.delete(index);
+          if (!bm) return null;
+
+          frames[index] = bm;
+          cachedCount++;
+
+          evictExcessFrames(Math.round(currentFrame));
+
+          if (Math.abs(currentFrame - index) < 1.5 || lastRenderedPos === -1) {
+            renderFrame(currentFrame, true);
+          }
+          return bm;
+        })
+        .catch(() => {
+          loadingSet.delete(index);
+          return null;
+        });
+    }
+
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.decoding = 'async';
+      const onDone = (success) => {
+        loadingSet.delete(index);
+        if (success) {
+          frames[index] = img;
+          cachedCount++;
+          evictExcessFrames(Math.round(currentFrame));
+          if (Math.abs(currentFrame - index) < 1.5 || lastRenderedPos === -1) {
+            renderFrame(currentFrame, true);
+          }
+        }
+        resolve(success ? img : null);
+      };
+
+      img.onload = () => {
+        if (typeof img.decode === 'function') img.decode().then(() => onDone(true), () => onDone(true));
+        else onDone(true);
+      };
+      img.onerror = () => onDone(false);
+      img.src = frameSrc(index);
+    });
+  }
+
+  function pumpQueue() {
+    while (activeWorkers < CONCURRENCY && queue.length > 0) {
+      const idx = queue.shift();
+      if (frames[idx] === null && !loadingSet.has(idx)) {
+        activeWorkers++;
+        decodeFrame(idx).finally(() => {
+          activeWorkers--;
+          pumpQueue();
+        });
+      }
+    }
+  }
+
+  function requestFrame(index, highPriority = false) {
+    if (index < 0 || index >= FRAME_COUNT) return;
+    if (frames[index] !== null || loadingSet.has(index)) return;
+
+    const existingPos = queue.indexOf(index);
+    if (existingPos !== -1) {
+      if (highPriority && existingPos > 0) {
+        queue.splice(existingPos, 1);
+        queue.unshift(index);
+      }
+      return;
+    }
+
+    if (highPriority) {
+      queue.unshift(index);
+    } else {
+      queue.push(index);
+    }
+    pumpQueue();
+  }
+
+  function ensureNeighborhood(centerIdx, direction = 1) {
+    // Priority 1: Current frame
+    requestFrame(centerIdx, true);
+
+    // Priority 2: Immediate adjacent frames
+    const forward1 = centerIdx + 1;
+    const backward1 = centerIdx - 1;
+    if (direction >= 0) {
+      if (forward1 < FRAME_COUNT) requestFrame(forward1, true);
+      if (backward1 >= 0) requestFrame(backward1, true);
+    } else {
+      if (backward1 >= 0) requestFrame(backward1, true);
+      if (forward1 < FRAME_COUNT) requestFrame(forward1, true);
+    }
+
+    // Priority 3: Directional lookahead
+    const lookahead = 14;
+    for (let offset = 2; offset <= lookahead; offset++) {
+      const primary = direction >= 0 ? centerIdx + offset : centerIdx - offset;
+      const secondary = direction >= 0 ? centerIdx - offset : centerIdx + offset;
+      if (primary >= 0 && primary < FRAME_COUNT) requestFrame(primary, false);
+      if (secondary >= 0 && secondary < FRAME_COUNT && offset <= 4) requestFrame(secondary, false);
+    }
+  }
+
+  function preloadKeyframes() {
+    // Background load a sparse spine (every 10th frame) across all 238 frames
+    // Guarantees fast scrolls land within <= 5 frames of an existing frame
+    for (let i = 0; i < FRAME_COUNT; i += 10) {
+      requestFrame(i, false);
+    }
+    requestFrame(FRAME_COUNT - 1, false);
   }
 
   function tick(timestamp) {
     const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, 0.05) : 1 / 60;
     lastTimestamp = timestamp;
 
+    if (scrollScheduled) {
+      scrollScheduled = false;
+      const newTarget = scrollYToFrame(pendingScrollY);
+      const diff = newTarget - targetFrame;
+      if (Math.abs(diff) > 0.01) {
+        lastScrollDirection = diff >= 0 ? 1 : -1;
+      }
+      targetFrame = newTarget;
+      updateHeaderAndNav(pendingScrollY);
+      ensureNeighborhood(Math.round(targetFrame), lastScrollDirection);
+    }
+
     const frameDelta = targetFrame - currentFrame;
-    if (Math.abs(frameDelta) < 0.008) {
+    const absDelta = Math.abs(frameDelta);
+
+    if (absDelta < 0.008) {
       currentFrame = targetFrame;
       renderFrame(currentFrame);
       rafId = null;
@@ -180,7 +430,10 @@
       return;
     }
 
-    const factor = 1 - Math.exp(-FRAME_EASE * dt);
+    // Dynamic adaptive easing: responsive when scrolling fast, silky smooth when scrolling slowly
+    const dynamicEase = absDelta > 6 ? 32 : (absDelta > 2 ? 26 : 22);
+    const factor = 1 - Math.exp(-dynamicEase * dt);
+
     currentFrame += frameDelta * factor;
     renderFrame(currentFrame);
     rafId = requestAnimationFrame(tick);
@@ -194,86 +447,9 @@
   }
 
   function onNativeScroll() {
-    const y = window.scrollY;
-    targetFrame = scrollYToFrame(y);
+    pendingScrollY = window.scrollY;
+    scrollScheduled = true;
     scheduleLoop();
-    updateHeaderAndNav(y);
-  }
-
-  function decodeFrame(index) {
-    if (USE_BITMAP) {
-      return fetch(frameSrc(index))
-        .then((res) => (res.ok ? res.blob() : null))
-        .then((blob) => {
-          if (!blob) return null;
-          // Decode device-sized bitmap to keep memory light and fluid on mobile while keeping 4K native on desktop
-          if (decodeTargetW < 3840 && typeof createImageBitmap === 'function') {
-            return createImageBitmap(blob, {
-              resizeWidth: decodeTargetW,
-              resizeHeight: decodeTargetH,
-              resizeQuality: 'high',
-            }).catch(() => createImageBitmap(blob));
-          }
-          return createImageBitmap(blob);
-        })
-        .then((bm) => {
-          if (!bm) return;
-          frames[index] = bm;
-          if (Math.abs(currentFrame - index) < 2 || lastRenderedPos === -1) {
-            renderFrame(currentFrame, true);
-          }
-        })
-        .catch(() => {});
-    }
-
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.decoding = 'async';
-      const done = () => {
-        frames[index] = img;
-        if (Math.abs(currentFrame - index) < 2 || lastRenderedPos === -1) {
-          renderFrame(currentFrame, true);
-        }
-        resolve();
-      };
-      img.onload = () => {
-        if (typeof img.decode === 'function') img.decode().then(done, done);
-        else done();
-      };
-      img.onerror = () => resolve();
-      img.src = frameSrc(index);
-    });
-  }
-
-  function preloadAllFrames() {
-    const initialIndex = Math.round(currentFrame);
-    const seen = new Set([initialIndex]);
-    const queue = [];
-
-    // Interleaved progressive order: 8 -> 4 -> 2 -> 1
-    for (const step of [8, 4, 2, 1]) {
-      for (let i = 0; i < FRAME_COUNT; i += step) {
-        if (!seen.has(i)) {
-          seen.add(i);
-          queue.push(i);
-        }
-      }
-    }
-
-    decodeFrame(initialIndex).then(() => {
-      const CONCURRENCY = 6;
-      let cursor = 0;
-
-      function worker() {
-        if (cursor >= queue.length) return;
-        const idx = queue[cursor++];
-        decodeFrame(idx).then(worker);
-      }
-
-      for (let i = 0; i < CONCURRENCY; i++) {
-        worker();
-      }
-    });
   }
 
   /* =========================================
@@ -1149,7 +1325,8 @@
   currentFrame = targetFrame;
 
   resize();
-  preloadAllFrames();
+  preloadKeyframes();
+  ensureNeighborhood(Math.round(currentFrame), 1);
   updateHeaderAndNav();
 
   window.addEventListener('scroll', onNativeScroll, { passive: true });
