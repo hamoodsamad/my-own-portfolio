@@ -196,7 +196,7 @@
     renderFrame(currentFrame, true);
     ensureNeighborhood(Math.round(currentFrame), 0);
 
-    const currentCardW = width <= 600 ? 175 : (width <= 768 ? 210 : 270);
+    const currentCardW = width <= 600 ? 160 : (width <= 768 ? 210 : 270);
     if (typeof lastCylinderCardW !== 'undefined' && lastCylinderCardW !== -1 && lastCylinderCardW !== currentCardW) {
       lastCylinderCardW = currentCardW;
       if (typeof renderProjects === 'function') renderProjects();
@@ -915,13 +915,13 @@
     // Radius calculation for 3D cylinder (compact, proportional for all screen sizes)
     const isMobile = window.innerWidth <= 600;
     const isTablet = window.innerWidth <= 768;
-    const cardWidth = isMobile ? 175 : isTablet ? 210 : 270;
+    const cardWidth = isMobile ? 160 : isTablet ? 210 : 270;
 
     let radius = 0;
     if (slotCount >= 3) {
       const radPerSlot = (Math.PI / slotCount);
       const computedR = (cardWidth / 2) / Math.tan(radPerSlot);
-      radius = Math.max(isMobile ? 145 : (isTablet ? 180 : 220), Math.round(computedR + (isMobile ? 10 : 20)));
+      radius = Math.max(isMobile ? 130 : (isTablet ? 180 : 220), Math.round(computedR + (isMobile ? 8 : 20)));
     }
 
     slots.forEach((slot, sIdx) => {
