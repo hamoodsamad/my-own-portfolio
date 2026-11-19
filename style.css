@@ -175,6 +175,9 @@ body {
   transform: translate3d(0, 0, 0);
   will-change: transform;
   contain: strict;
+  /* Crisp pixel output — avoids browser upscale blur on retina when DPR is capped */
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
 }
 
 .canvas-vignette {
@@ -720,6 +723,8 @@ button {
    ========================================= */
 .trusted {
   padding-block: clamp(56px, 9vh, 108px);
+  content-visibility: auto;
+  contain-intrinsic-size: 0 500px;
 }
 
 .trusted-inner {
@@ -1098,6 +1103,8 @@ button {
    ========================================= */
 .services-section {
   padding-block: clamp(72px, 11vh, 130px);
+  content-visibility: auto;
+  contain-intrinsic-size: 0 600px;
 }
 
 .services-head {

@@ -90,6 +90,7 @@
     const FRAME_COUNT = 238;
     const USE_BITMAP =
       window.location.protocol !== 'file:' && typeof window.createImageBitmap === 'function';
+    const REDUCE_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     const canvas = document.getElementById('scroll-canvas');
     if (!canvas) return null;
@@ -201,8 +202,11 @@
           .then((res) => (res.ok ? res.blob() : null))
           .then((blob) => {
             if (!blob) return null;
-            // Native direct hardware texture decode capped at 1080p — ZERO CPU Lanczos overhead!
-            return createImageBitmap(blob);
+            // Native hardware-accelerated decode capped to 1920×1080 — ZERO CPU Lanczos overhead!
+            // resizeWidth/resizeHeight instruct the browser to decode directly into a
+            // 1080p-sized ImageBitmap, keeping GPU VRAM lean on 4K / HiDPI devices.
+            const bitmapOpts = { resizeWidth: DECODE_WIDTH, resizeHeight: DECODE_HEIGHT, resizeQuality: 'medium', imageOrientation: 'none' };
+            return createImageBitmap(blob, bitmapOpts).catch(() => createImageBitmap(blob));
           })
           .then((bm) => {
             loadingSet.delete(index);
@@ -386,9 +390,12 @@
       // Centered horizontally so subject and atmospheric side smoke remain perfectly balanced
       const offsetX = Math.round((width - drawW) * 0.5);
 
-      // Vertical positioning:
-      // Anchor with comfortable top-bias so hair top has natural headroom below navbar
-      const offsetY = Math.round((height - drawH) * 0.20);
+      // Vertical positioning — adaptive top bias:
+      // On landscape / desktop viewports: 20% top bias gives natural headroom below navbar.
+      // On portrait / narrow mobile viewports: use 10% so the face isn't cropped at the top.
+      const isPortrait = height > width * 1.1;
+      const vertBias = isPortrait ? 0.10 : 0.20;
+      const offsetY = Math.round((height - drawH) * vertBias);
 
       return { offsetX, offsetY, drawW, drawH };
     }
@@ -466,9 +473,10 @@
       }
 
       // Responsive, critically-damped spring dynamics:
-      // High responsiveness (25-36) ensures zero delay behind scroll motion,
-      // while eliminating discrete wheel ticks for silky-smooth ("makhan") motion
-      const dynamicEase = absDelta > 10 ? 36 : (absDelta > 2 ? 30 : 25);
+      // Tuned for silky smooth motion — high enough for instant response,
+      // gentle enough to prevent stuttering when frames are still decoding.
+      // Large jumps (fast scroll) use a softer ease so fallback frames feel intentional.
+      const dynamicEase = absDelta > 10 ? 28 : (absDelta > 2 ? 26 : 22);
       const factor = 1 - Math.exp(-dynamicEase * dt);
 
       currentFrame += delta * factor;
@@ -481,6 +489,22 @@
       if (rafId === null) {
         lastTimestamp = 0;
         rafId = requestAnimationFrame(tick);
+      }
+    }
+
+    // Pause rAF when tab is hidden to save CPU/GPU completely
+    function onVisibilityChange() {
+      if (document.visibilityState === 'hidden') {
+        if (rafId !== null) {
+          cancelAnimationFrame(rafId);
+          rafId = null;
+          lastTimestamp = 0;
+        }
+      } else {
+        // Resume on tab focus — re-sync scroll position first
+        pendingScrollY = window.scrollY || window.pageYOffset || 0;
+        scrollScheduled = true;
+        scheduleLoop();
       }
     }
 
@@ -505,10 +529,11 @@
       if (canvas.width !== targetCanvasW || canvas.height !== targetCanvasH) {
         canvas.width = targetCanvasW;
         canvas.height = targetCanvasH;
-        ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
       }
+      // Always re-apply transform and smoothing — canvas 2D context state resets on any size change
+      ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
 
       cachedDrawRect = computeDrawRect();
 
@@ -537,12 +562,19 @@
     }
 
     function init() {
+      // Respect prefers-reduced-motion — disable the canvas animation entirely
+      if (REDUCE_MOTION) {
+        canvas.style.display = 'none';
+        return;
+      }
       updateLayoutCaches();
       targetFrame = scrollYToFrame(window.scrollY || window.pageYOffset || 0);
       currentFrame = targetFrame;
       resize();
       preloadAnchorFrames();
       ensureNeighborhood(Math.round(currentFrame), 1);
+      // Pause rAF when tab is hidden to save CPU/GPU
+      document.addEventListener('visibilitychange', onVisibilityChange, { passive: true });
     }
 
     return {
@@ -1483,9 +1515,12 @@
     }
 
     function restartClass(node, className) {
+      // Use a micro-task clone approach to restart the CSS animation without
+      // triggering a synchronous forced layout (avoids expensive offsetWidth reflow).
       node.classList.remove(className);
-      void node.offsetWidth; // Force reflow for CSS keyframe restart
-      node.classList.add(className);
+      requestAnimationFrame(() => {
+        node.classList.add(className);
+      });
     }
 
     function init() {
