@@ -97,8 +97,9 @@
     // Permanent 238-frame in-memory cache — zero eviction during scroll, zero re-fetching!
     const frames = new Array(FRAME_COUNT).fill(null);
     const loadingSet = new Set();
-    const queue = [];
-    const CONCURRENCY = 10;
+    const urgentQueue = [];
+    const idleQueue = [];
+    const CONCURRENCY = 8;
     let activeWorkers = 0;
     let cachedCount = 0;
 
@@ -152,7 +153,8 @@
         releaseFrame(i);
       }
       loadingSet.clear();
-      queue.length = 0;
+      urgentQueue.length = 0;
+      idleQueue.length = 0;
       cachedCount = 0;
     }
 
@@ -169,7 +171,7 @@
             ? {
                 resizeWidth: decodeTargetW,
                 resizeHeight: decodeTargetH,
-                resizeQuality: 'high',
+                resizeQuality: 'low',
               }
             : undefined;
 
@@ -196,8 +198,9 @@
             frames[index] = bm;
             cachedCount++;
 
-            // Trigger immediate render if this is the frame we're waiting for
-            if (Math.abs(currentFrame - index) < 1.5 || lastRenderedPos === -1) {
+            // Trigger immediate render upgrade if this landed frame is near current scroll focus
+            const dist = Math.abs(currentFrame - index);
+            if (dist < 3.0 || lastRenderedPos !== Math.round(currentFrame) || lastRenderedPos === -1) {
               needsRender = true;
               scheduleLoop();
             }
@@ -217,7 +220,8 @@
           if (success) {
             frames[index] = img;
             cachedCount++;
-            if (Math.abs(currentFrame - index) < 1.5 || lastRenderedPos === -1) {
+            const dist = Math.abs(currentFrame - index);
+            if (dist < 3.0 || lastRenderedPos !== Math.round(currentFrame) || lastRenderedPos === -1) {
               needsRender = true;
               scheduleLoop();
             }
@@ -235,8 +239,9 @@
     }
 
     function pumpQueue() {
-      while (activeWorkers < CONCURRENCY && queue.length > 0) {
-        const idx = queue.shift();
+      while (activeWorkers < CONCURRENCY && (urgentQueue.length > 0 || idleQueue.length > 0)) {
+        // Priority: Always pull urgent scroll neighborhood frames first!
+        const idx = urgentQueue.length > 0 ? urgentQueue.shift() : idleQueue.shift();
         if (frames[idx] === null && !loadingSet.has(idx)) {
           activeWorkers++;
           decodeFrame(idx).finally(() => {
@@ -247,49 +252,51 @@
       }
     }
 
-    function requestFrame(index, highPriority = false) {
+    function requestFrame(index, isUrgent = false) {
       if (index < 0 || index >= FRAME_COUNT) return;
       if (frames[index] !== null || loadingSet.has(index)) return;
 
-      const existingPos = queue.indexOf(index);
-      if (existingPos !== -1) {
-        if (highPriority && existingPos > 0) {
-          queue.splice(existingPos, 1);
-          queue.unshift(index);
-        }
-        return;
-      }
+      if (isUrgent) {
+        // Promote from idle to urgent if already waiting in idle
+        const idlePos = idleQueue.indexOf(index);
+        if (idlePos !== -1) idleQueue.splice(idlePos, 1);
 
-      if (highPriority) {
-        queue.unshift(index);
+        if (urgentQueue.indexOf(index) === -1) {
+          urgentQueue.push(index);
+          // Distance-sort urgentQueue so closest frames to targetFrame are processed first
+          urgentQueue.sort((a, b) => {
+            const distA = Math.abs(a - targetFrame);
+            const distB = Math.abs(b - targetFrame);
+            return distA - distB;
+          });
+        }
       } else {
-        queue.push(index);
+        if (urgentQueue.indexOf(index) === -1 && idleQueue.indexOf(index) === -1) {
+          idleQueue.push(index);
+        }
       }
       pumpQueue();
     }
 
     function ensureNeighborhood(centerIdx, direction = 1) {
-      // Priority 1: Current frame
-      requestFrame(centerIdx, true);
-
-      // Priority 2: Immediate adjacent frames
-      const forward1 = centerIdx + 1;
-      const backward1 = centerIdx - 1;
-      if (direction >= 0) {
-        if (forward1 < FRAME_COUNT) requestFrame(forward1, true);
-        if (backward1 >= 0) requestFrame(backward1, true);
-      } else {
-        if (backward1 >= 0) requestFrame(backward1, true);
-        if (forward1 < FRAME_COUNT) requestFrame(forward1, true);
-      }
-
-      // Priority 3: Directional lookahead (buffer ahead in direction of scroll)
+      // Collect neighborhood frames in order of immediate visual urgency
       const lookahead = 24;
+      const candidates = [centerIdx];
+
+      const primary1 = direction >= 0 ? centerIdx + 1 : centerIdx - 1;
+      const secondary1 = direction >= 0 ? centerIdx - 1 : centerIdx + 1;
+      if (primary1 >= 0 && primary1 < FRAME_COUNT) candidates.push(primary1);
+      if (secondary1 >= 0 && secondary1 < FRAME_COUNT) candidates.push(secondary1);
+
       for (let offset = 2; offset <= lookahead; offset++) {
         const primary = direction >= 0 ? centerIdx + offset : centerIdx - offset;
         const secondary = direction >= 0 ? centerIdx - offset : centerIdx + offset;
-        if (primary >= 0 && primary < FRAME_COUNT) requestFrame(primary, true);
-        if (secondary >= 0 && secondary < FRAME_COUNT && offset <= 6) requestFrame(secondary, false);
+        if (primary >= 0 && primary < FRAME_COUNT) candidates.push(primary);
+        if (secondary >= 0 && secondary < FRAME_COUNT && offset <= 6) candidates.push(secondary);
+      }
+
+      for (let i = 0; i < candidates.length; i++) {
+        requestFrame(candidates[i], true);
       }
     }
 
@@ -489,6 +496,9 @@
         if (physicalW >= 2560 || width >= 1920) {
           nextTargetW = 2560;
           nextTargetH = 1440;
+        } else if (width <= 1440 && height <= 900) {
+          nextTargetW = 1600;
+          nextTargetH = 900;
         } else {
           nextTargetW = 1920;
           nextTargetH = 1080;
