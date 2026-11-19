@@ -105,16 +105,24 @@
     const WINDOW_RADIUS = 20;     // Immediate lookahead / lookbehind
     const PRUNE_DISTANCE = 35;    // Evict frames further than 35 frames from active scroll focus
     const ANCHOR_STRIDE = 16;     // Keep coarse anchor keyframes (every 16th frame + 0 + 237) for instant jump fallback
+    // Throttle prune to only fire when center moves ≥ this many frames — avoids 238-iter scan every rAF tick
+    const PRUNE_THROTTLE = 5;
 
     const frames = new Array(FRAME_COUNT).fill(null);
     const loadingSet = new Set();
+    // urgentQueue is a min-heap ordered by distance from current focus (closest = index 0).
+    // We use a simple sorted-insertion approach: insertUrgent() keeps it ordered without
+    // re-sorting the entire array on every scroll event (O(n) insert vs O(n log n) sort).
     const urgentQueue = [];
     const idleQueue = [];
     const inUrgentSet = new Set();
     const inIdleSet = new Set();
-    const CONCURRENCY = 6;
+    // 4 concurrent fetches: enough to stay ahead of scroll without congesting the HTTP/2 pipeline
+    const CONCURRENCY = 4;
     let activeWorkers = 0;
     let cachedCount = 0;
+    // Track last prune center to avoid re-pruning on micro-movements
+    let lastPrunedCenter = -1;
 
     let width = 0;
     let height = 0;
@@ -131,6 +139,8 @@
     let rafId = null;
     let lastTimestamp = 0;
     let pendingScrollY = 0;
+    let prevScrollY = 0;         // Previous scroll position for velocity tracking
+    let scrollVelocity = 0;      // Frames-per-second scroll speed (signed)
     let scrollScheduled = false;
     let lastScrollDirection = 1; // 1 = scrolling down, -1 = scrolling up
 
@@ -161,8 +171,12 @@
      * Sliding Window Memory Model:
      * Actively prunes non-anchor frames whose distance from active scroll focus
      * exceeds PRUNE_DISTANCE, bounding GPU VRAM footprint to ~30-40 textures.
+     * Throttled: only fires when center has moved ≥ PRUNE_THROTTLE frames from last prune,
+     * eliminating the 238-iteration scan from running every single rAF tick.
      */
     function pruneDistantFrames(centerIdx) {
+      if (Math.abs(centerIdx - lastPrunedCenter) < PRUNE_THROTTLE) return;
+      lastPrunedCenter = centerIdx;
       for (let i = 0; i < FRAME_COUNT; i++) {
         // Retain anchor keyframes (first, last, and every 16th frame) for instant scroll jump fallback
         if (i === 0 || i === FRAME_COUNT - 1 || i % ANCHOR_STRIDE === 0) {
@@ -188,6 +202,7 @@
       inIdleSet.clear();
       cachedCount = 0;
       lastNeighborhoodCenter = -1;
+      lastPrunedCenter = -1;
     }
 
     function decodeFrame(index) {
@@ -232,8 +247,9 @@
             frames[index] = bm;
             cachedCount++;
 
-            // Only trigger immediate render update if this frame matches what should currently be on screen
-            if (index === currentInt || lastRenderedPos === -1) {
+            // Trigger immediate render if this is the current frame OR the next likely frame (±1).
+            // This avoids a stale fallback being shown for 1 extra rAF tick when the adjacent frame arrives.
+            if (Math.abs(index - currentInt) <= 1 || lastRenderedPos === -1) {
               needsRender = true;
               scheduleLoop();
             }
@@ -255,7 +271,7 @@
             frames[index] = img;
             cachedCount++;
             const currentInt = Math.round(currentFrame);
-            if (index === currentInt || lastRenderedPos === -1) {
+            if (Math.abs(index - currentInt) <= 1 || lastRenderedPos === -1) {
               needsRender = true;
               scheduleLoop();
             }
@@ -280,6 +296,8 @@
           inUrgentSet.delete(idx);
         } else {
           idx = idleQueue.shift();
+          // Skip stale idle entries that were promoted to urgent (mark-skip pattern)
+          if (!inIdleSet.has(idx)) continue;
           inIdleSet.delete(idx);
         }
 
@@ -293,19 +311,29 @@
       }
     }
 
-    function requestFrame(index, isUrgent = false) {
+    function requestFrame(index, isUrgent = false, centerIdx = 0) {
       if (index < 0 || index >= FRAME_COUNT) return;
       if (frames[index] !== null || loadingSet.has(index)) return;
 
       if (isUrgent) {
+        // O(1) promotion: drop from idle if present (mark-skip — O(1) with Set)
         if (inIdleSet.has(index)) {
-          const idlePos = idleQueue.indexOf(index);
-          if (idlePos !== -1) idleQueue.splice(idlePos, 1);
           inIdleSet.delete(index);
+          // Don't splice (O(n)) — pumpQueue skips stale idle entries via inIdleSet check
         }
         if (!inUrgentSet.has(index)) {
-          urgentQueue.push(index);
           inUrgentSet.add(index);
+          // Sorted insertion by distance to centerIdx — O(n) worst case but runs rarely
+          // since most frames are inserted in already-near order. Avoids full O(n log n)
+          // sort on every ensureNeighborhood call during the rAF hot path.
+          const dist = Math.abs(index - centerIdx);
+          let lo = 0, hi = urgentQueue.length;
+          while (lo < hi) {
+            const mid = (lo + hi) >>> 1;
+            if (Math.abs(urgentQueue[mid] - centerIdx) <= dist) lo = mid + 1;
+            else hi = mid;
+          }
+          urgentQueue.splice(lo, 0, index);
         }
       } else {
         if (!inUrgentSet.has(index) && !inIdleSet.has(index)) {
@@ -334,14 +362,14 @@
       for (let i = 0; i < candidates.length; i++) {
         const idx = candidates[i];
         if (frames[idx] === null && !loadingSet.has(idx) && !inUrgentSet.has(idx)) {
-          requestFrame(idx, true);
+          // Pass centerIdx so requestFrame can do sorted-insertion — no post-sort needed!
+          requestFrame(idx, true, centerIdx);
           addedAny = true;
         }
       }
 
       if (addedAny) {
-        // Single sort by distance to centerIdx — no repeated quadratic array sorting!
-        urgentQueue.sort((a, b) => Math.abs(a - centerIdx) - Math.abs(b - centerIdx));
+        // Queue is already ordered by sorted-insertion — just pump without sorting!
         pumpQueue();
       }
     }
@@ -402,7 +430,10 @@
 
     function findNearestFrame(index) {
       if (frames[index]) return index;
-      for (let offset = 1; offset < FRAME_COUNT; offset++) {
+      // Cap search to PRUNE_DISTANCE — anything further is definitely evicted.
+      // This eliminates worst-case 238-iteration scan on every renderFrame call.
+      const maxSearch = Math.min(PRUNE_DISTANCE, FRAME_COUNT);
+      for (let offset = 1; offset <= maxSearch; offset++) {
         const prev = index - offset;
         const next = index + offset;
         if (prev >= 0 && frames[prev]) return prev;
@@ -435,7 +466,9 @@
     }
 
     function tick(timestamp) {
-      const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, 0.05) : 1 / 60;
+      // Cap dt at 1/30s (33ms) — tighter than 50ms to prevent a large
+      // position jump after a tab-resume or dropped frame that would look like a pop.
+      const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, 1 / 30) : 1 / 60;
       lastTimestamp = timestamp;
 
       if (scrollScheduled) {
@@ -446,6 +479,14 @@
         if (Math.abs(diff) > 0.01) {
           lastScrollDirection = diff >= 0 ? 1 : -1;
         }
+
+        // Track scroll velocity in frame-units/sec for adaptive lookahead
+        // scrollVelocity > 0 → scrolling down, < 0 → scrolling up
+        const rawFrameDelta = scrollYToFrame(pendingScrollY) - scrollYToFrame(prevScrollY);
+        // Exponential moving average to smooth out micro-jitter in velocity
+        scrollVelocity = scrollVelocity * 0.6 + (rawFrameDelta / Math.max(dt, 1 / 120)) * 0.4;
+        prevScrollY = pendingScrollY;
+
         targetFrame = newTarget;
 
         if (typeof NavigationController !== 'undefined') {
@@ -455,7 +496,14 @@
         const roundedTarget = Math.round(targetFrame);
         if (roundedTarget !== lastNeighborhoodCenter) {
           lastNeighborhoodCenter = roundedTarget;
-          ensureNeighborhood(roundedTarget, lastScrollDirection);
+          // During fast scroll, bias the entire lookahead window forward in the direction of motion.
+          // velocityBias shifts the center of the window so we're preloading the frames
+          // the user will reach NEXT, not just the symmetric neighborhood.
+          const absVel = Math.abs(scrollVelocity);
+          const velocityBias = absVel > 3
+            ? Math.min(Math.round(absVel * 0.18), 8) * lastScrollDirection
+            : 0;
+          ensureNeighborhood(Math.max(0, Math.min(FRAME_COUNT - 1, roundedTarget + velocityBias)), lastScrollDirection);
           pruneDistantFrames(roundedTarget); // Active sliding window VRAM eviction!
         }
       }
