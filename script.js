@@ -195,6 +195,14 @@
     lastRenderedPos = -1;
     renderFrame(currentFrame, true);
     ensureNeighborhood(Math.round(currentFrame), 0);
+
+    const currentCardW = width <= 600 ? 175 : (width <= 768 ? 210 : 270);
+    if (typeof lastCylinderCardW !== 'undefined' && lastCylinderCardW !== -1 && lastCylinderCardW !== currentCardW) {
+      lastCylinderCardW = currentCardW;
+      if (typeof renderProjects === 'function') renderProjects();
+    } else if (typeof lastCylinderCardW !== 'undefined') {
+      lastCylinderCardW = currentCardW;
+    }
   }
 
   function findNearestFrame(index) {
@@ -596,6 +604,7 @@
   let carouselRaf = null;
   let slotCount = 1;
   let slotAngleStep = 360;
+  let lastCylinderCardW = -1;
 
   function formatCategoryTitle(cat) {
     if (cat === 'ALL') return 'All Categories';
@@ -831,16 +840,16 @@
     slotCount = slots.length;
     slotAngleStep = 360 / slotCount;
 
-    // Radius calculation for 3D cylinder (compact normal size)
+    // Radius calculation for 3D cylinder (compact, proportional for all screen sizes)
     const isMobile = window.innerWidth <= 600;
     const isTablet = window.innerWidth <= 768;
-    const cardWidth = isMobile ? 210 : isTablet ? 240 : 270;
+    const cardWidth = isMobile ? 175 : isTablet ? 210 : 270;
 
     let radius = 0;
     if (slotCount >= 3) {
       const radPerSlot = (Math.PI / slotCount);
       const computedR = (cardWidth / 2) / Math.tan(radPerSlot);
-      radius = Math.max(isMobile ? 180 : 220, Math.round(computedR + (isMobile ? 15 : 25)));
+      radius = Math.max(isMobile ? 145 : (isTablet ? 180 : 220), Math.round(computedR + (isMobile ? 10 : 20)));
     }
 
     slots.forEach((slot, sIdx) => {

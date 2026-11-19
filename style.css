@@ -1502,22 +1502,26 @@ button {
 
 .carousel-card .project-thumb {
   position: relative;
-  aspect-ratio: 16 / 9.5;
+  aspect-ratio: 16 / 10;
   width: 100%;
   overflow: hidden;
-  background: rgba(0, 0, 0, 0.6);
+  background: linear-gradient(180deg, rgba(16, 12, 24, 0.95), rgba(8, 6, 12, 0.98));
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .carousel-card .project-thumb img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
+  padding: 6px;
   transition: transform 0.4s ease;
 }
 
 .carousel-card:hover .project-thumb img {
-  transform: scale(1.05);
+  transform: scale(1.04);
 }
 
 .carousel-card .project-badge {
@@ -1711,18 +1715,18 @@ button {
 
 @media (max-width: 768px) {
   .carousel-stage {
-    height: 370px;
-    perspective: 1000px;
+    height: 330px;
+    perspective: 900px;
   }
 
   .carousel-cylinder {
-    width: 240px;
-    height: 330px;
+    width: 210px;
+    height: 290px;
   }
 
   .carousel-card {
-    width: 240px;
-    height: 330px;
+    width: 210px;
+    height: 290px;
   }
 
   .carousel-card .project-body {
@@ -1732,35 +1736,71 @@ button {
 
 @media (max-width: 600px) {
   .carousel-stage {
-    height: 330px;
-    perspective: 850px;
+    height: 275px;
+    perspective: 720px;
   }
 
   .carousel-cylinder {
-    width: 210px;
-    height: 295px;
+    width: 175px;
+    height: 245px;
   }
 
   .carousel-card {
-    width: 210px;
-    height: 295px;
+    width: 175px;
+    height: 245px;
+    border-radius: 14px;
+  }
+
+  .carousel-card .project-thumb {
+    aspect-ratio: 16 / 10;
+  }
+
+  .carousel-card .project-thumb img {
+    padding: 4px;
+    object-fit: contain !important;
+  }
+
+  .carousel-card .project-badge {
+    top: 6px;
+    left: 6px;
+    font-size: 0.54rem;
+    padding: 2px 6px;
+  }
+
+  .carousel-card .project-index {
+    top: 6px;
+    right: 6px;
+    font-size: 0.58rem;
+    padding: 2px 5px;
   }
 
   .carousel-card .project-body {
-    padding: 8px 10px;
+    padding: 6px 8px;
+    gap: 4px;
   }
 
   .carousel-card .project-title {
-    font-size: 0.86rem;
+    font-size: 0.78rem;
+    line-height: 1.2;
   }
 
   .carousel-card .project-desc {
-    font-size: 0.7rem;
+    font-size: 0.65rem;
+    line-height: 1.35;
+    -webkit-line-clamp: 2;
+  }
+
+  .carousel-card .project-footer {
+    padding-top: 4px;
+  }
+
+  .carousel-card .project-link {
+    font-size: 0.68rem;
   }
 
   .carousel-nav-btn {
-    width: 34px;
-    height: 34px;
+    width: 30px;
+    height: 30px;
   }
 
   .category-menu {
