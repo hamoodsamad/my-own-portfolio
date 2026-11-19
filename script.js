@@ -409,23 +409,39 @@
     }
 
     function computeDrawRect(imgW = DECODE_WIDTH, imgH = DECODE_HEIGHT) {
-      // True full-bleed edge-to-edge cover framing:
-      // Fills 100% of viewport width and height with zero letterboxing / zero black side bars
-      const scale = Math.max(width / imgW, height / imgH);
+      const isPortrait = height > width * 1.15 || width <= 768;
+
+      if (!isPortrait) {
+        // Landscape / Desktop & Laptop Framing:
+        // True full-bleed edge-to-edge cover framing with 20% vertical top-bias
+        const scale = Math.max(width / imgW, height / imgH);
+        const drawW = Math.round(imgW * scale);
+        const drawH = Math.round(imgH * scale);
+        const offsetX = Math.round((width - drawW) * 0.5);
+        const offsetY = Math.round((height - drawH) * 0.20);
+        return { offsetX, offsetY, drawW, drawH, isPortrait: false };
+      }
+
+      // Portrait / Mobile Framing:
+      // Prevent 400% zoom-in on the ear!
+      // Scale subject naturally so head is ~24%–26% of viewport height (not 50%+).
+      const scale = Math.min(Math.max(width / 700, height / 1600), 0.62);
       const drawW = Math.round(imgW * scale);
       const drawH = Math.round(imgH * scale);
 
-      // Centered horizontally so subject and atmospheric side smoke remain perfectly balanced
-      const offsetX = Math.round((width - drawW) * 0.5);
+      // Adaptive horizontal tracking:
+      // In 1920x1080 frames, subject moves gently from profile (x=790) to frontal center (x=950).
+      // Placing subjectAnchorX at 50% of viewport width keeps the face centered on the phone screen!
+      const progress = Math.min(1, Math.max(0, currentFrame / (FRAME_COUNT - 1)));
+      const subjectAnchorX = 790 + progress * 160;
+      const offsetX = Math.round(width * 0.50 - subjectAnchorX * scale);
 
-      // Vertical positioning — adaptive top bias:
-      // On landscape / desktop viewports: 20% top bias gives natural headroom below navbar.
-      // On portrait / narrow mobile viewports: use 10% so the face isn't cropped at the top.
-      const isPortrait = height > width * 1.1;
-      const vertBias = isPortrait ? 0.10 : 0.20;
-      const offsetY = Math.round((height - drawH) * vertBias);
+      // Vertical position:
+      // Place top of hair comfortably below mobile navbar with natural headroom
+      const targetHeadTop = Math.max(76, Math.round(height * 0.10));
+      const offsetY = Math.round(targetHeadTop - 150 * scale);
 
-      return { offsetX, offsetY, drawW, drawH };
+      return { offsetX, offsetY, drawW, drawH, isPortrait: true };
     }
 
     function findNearestFrame(index) {
@@ -456,10 +472,18 @@
       const baseImg = frames[resolvedBase];
       if (!baseImg) return;
 
-      const rect = cachedDrawRect || computeDrawRect();
+      // On portrait / mobile, recompute drawRect when currentFrame moves so subject stays centered
+      const isPortrait = height > width * 1.15 || width <= 768;
+      const rect = isPortrait ? computeDrawRect() : (cachedDrawRect || computeDrawRect());
       const { offsetX, offsetY, drawW, drawH } = rect;
 
-      // Draw crisp master frame — completely covers viewport edge-to-edge with 0 overdraw
+      // On portrait / mobile, clear canvas with deep background color
+      if (isPortrait) {
+        ctx.fillStyle = '#050308';
+        ctx.fillRect(0, 0, width, height);
+      }
+
+      // Draw crisp frame
       ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
 
       lastRenderedPos = resolvedBase;
@@ -521,10 +545,10 @@
       }
 
       // Responsive, critically-damped spring dynamics:
-      // Tuned for silky smooth motion — high enough for instant response,
-      // gentle enough to prevent stuttering when frames are still decoding.
-      // Large jumps (fast scroll) use a softer ease so fallback frames feel intentional.
-      const dynamicEase = absDelta > 10 ? 28 : (absDelta > 2 ? 26 : 22);
+      // High responsiveness on mobile ensures zero drag behind finger flicks
+      const isMob = width < 768 || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 1 && width < 1024);
+      const baseEase = isMob ? 38 : 28;
+      const dynamicEase = absDelta > 10 ? (isMob ? 48 : 34) : (absDelta > 2 ? baseEase : 24);
       const factor = 1 - Math.exp(-dynamicEase * dt);
 
       currentFrame += delta * factor;
@@ -567,8 +591,9 @@
       updateLayoutCaches();
 
       const rawDpr = window.devicePixelRatio || 1;
-      // Cap canvas scale at 1.5 and max resolution at 1920x1080 to prevent 4K backbuffer VRAM bloat
-      canvasScale = Math.min(rawDpr, 1.5);
+      const isMob = width < 768 || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 1 && width < 1024);
+      // On mobile devices, cap DPR at 1.25 to prevent GPU thermal throttling and fillrate lagging
+      canvasScale = isMob ? Math.min(rawDpr, 1.25) : Math.min(rawDpr, 1.5);
 
       const targetCanvasW = Math.min(DECODE_WIDTH, Math.max(1, Math.round(width * canvasScale)));
       const targetCanvasH = Math.min(DECODE_HEIGHT, Math.max(1, Math.round(height * canvasScale)));
