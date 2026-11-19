@@ -14,9 +14,9 @@
   const frames = new Array(FRAME_COUNT).fill(null);
   const loadingSet = new Set();
   const queue = [];
-  const CONCURRENCY = 6;
+  const CONCURRENCY = 8;
   let activeWorkers = 0;
-  let maxCachedFrames = 238; // dynamically tuned: 90 on mobile, 140 on tablet, 238 on desktop
+  let maxCachedFrames = 238; // dynamically tuned: 140 on mobile, 185 on tablet, 238 on desktop
   let cachedCount = 0;
 
   let width = 0;
@@ -117,7 +117,7 @@
     const { isMob, isTablet } = detectDevice();
 
     // Dynamically tune cache capacity based on device capabilities
-    maxCachedFrames = isMob ? 90 : (isTablet ? 140 : 238);
+    maxCachedFrames = isMob ? 140 : (isTablet ? 185 : 238);
 
     let nextTargetW = 2560;
     let nextTargetH = 1440;
@@ -248,7 +248,7 @@
   function evictExcessFrames(centerIdx) {
     if (cachedCount <= maxCachedFrames) return;
 
-    const SAFE_RADIUS = 16;
+    const SAFE_RADIUS = 24;
     let furthestIdx = -1;
     let maxDist = -1;
 
@@ -397,8 +397,8 @@
       if (forward1 < FRAME_COUNT) requestFrame(forward1, true);
     }
 
-    // Priority 3: Directional lookahead
-    const lookahead = 14;
+    // Priority 3: Directional lookahead (wider buffer for rapid scroll jumps)
+    const lookahead = 18;
     for (let offset = 2; offset <= lookahead; offset++) {
       const primary = direction >= 0 ? centerIdx + offset : centerIdx - offset;
       const secondary = direction >= 0 ? centerIdx - offset : centerIdx + offset;
