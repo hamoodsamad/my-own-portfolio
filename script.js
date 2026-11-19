@@ -74,14 +74,8 @@
       const isTabletUA =
         /iPad/i.test(ua) ||
         (navigator.maxTouchPoints > 1 && Math.min(window.screen.width, window.screen.height) >= 600);
-      const isSmallScreen =
-        window.innerWidth <= 768 || Math.min(window.screen.width, window.screen.height) <= 600;
-      const isMob = isMobileUA || (isSmallScreen && !isTabletUA);
-      const isTablet =
-        isTabletUA ||
-        (!isMob &&
-          window.innerWidth <= 1024 &&
-          (navigator.maxTouchPoints > 1 || window.innerHeight > window.innerWidth));
+      const isMob = isMobileUA;
+      const isTablet = isTabletUA;
       return { isMob, isTablet };
     },
   };
@@ -89,11 +83,10 @@
   /* ==========================================================================
      MODULE 3: DECOUPLED SCROLL CANVAS ANIMATION ENGINE
      Decouples asynchronous frame decoding from the 60fps/120fps rAF render loop.
-     Enforces strict ImageBitmap caching with immediate GPU memory reclamation.
+     Features full sequence progressive caching (238 frames) with 0 eviction during scroll.
      ========================================================================== */
   const ScrollCanvasEngine = (() => {
     const FRAME_COUNT = 238;
-    const SCROLL_ANIM_PACE = 2.1;
     const USE_BITMAP =
       window.location.protocol !== 'file:' && typeof window.createImageBitmap === 'function';
 
@@ -101,14 +94,12 @@
     if (!canvas) return null;
     const ctx = canvas.getContext('2d', { alpha: false });
 
-    // Intelligent sliding cache with resource release (.close())
+    // Permanent 238-frame in-memory cache — zero eviction during scroll, zero re-fetching!
     const frames = new Array(FRAME_COUNT).fill(null);
     const loadingSet = new Set();
-    const abortControllers = new Map(); // index -> AbortController
     const queue = [];
-    const CONCURRENCY = 8;
+    const CONCURRENCY = 10;
     let activeWorkers = 0;
-    let maxCachedFrames = 238; // Dynamically tuned per device
     let cachedCount = 0;
 
     let width = 0;
@@ -154,76 +145,15 @@
     }
 
     /**
-     * Completely purges all cached frames and in-flight fetch controllers.
+     * Completely purges all cached frames when resolution changes.
      */
     function clearAllFrames() {
       for (let i = 0; i < FRAME_COUNT; i++) {
         releaseFrame(i);
       }
-      abortControllers.forEach((ctrl) => {
-        try { ctrl.abort(); } catch (_) {}
-      });
-      abortControllers.clear();
       loadingSet.clear();
       queue.length = 0;
       cachedCount = 0;
-    }
-
-    /**
-     * Evicts excess frames furthest from current position to enforce strict memory bounds.
-     */
-    function evictExcessFrames(centerIdx) {
-      if (cachedCount <= maxCachedFrames) return;
-      const SAFE_RADIUS = 24;
-
-      while (cachedCount > maxCachedFrames) {
-        let furthestIdx = -1;
-        let maxDist = -1;
-
-        for (let i = 0; i < FRAME_COUNT; i++) {
-          if (frames[i] !== null) {
-            const dist = Math.abs(i - centerIdx);
-            // Protect frames within immediate safe radius
-            if (dist > SAFE_RADIUS && dist > maxDist) {
-              maxDist = dist;
-              furthestIdx = i;
-            }
-          }
-        }
-
-        if (furthestIdx === -1) {
-          // All cached frames are within safe radius
-          break;
-        }
-
-        releaseFrame(furthestIdx);
-      }
-    }
-
-    /**
-     * Cancels obsolete in-flight frame network requests during rapid scrolling jumps.
-     */
-    function cancelObsoleteRequests(centerIdx) {
-      abortControllers.forEach((ctrl, idx) => {
-        // Protect sparse keyframe spine (every 10th frame)
-        if (idx % 10 !== 0 && Math.abs(idx - centerIdx) > 36) {
-          try { ctrl.abort(); } catch (_) {}
-          abortControllers.delete(idx);
-          loadingSet.delete(idx);
-        }
-      });
-    }
-
-    /**
-     * Prunes obsolete requests from the pending decode queue.
-     */
-    function pruneQueue(centerIdx, lookahead = 20) {
-      for (let i = queue.length - 1; i >= 0; i--) {
-        const idx = queue[i];
-        if (idx % 10 !== 0 && Math.abs(idx - centerIdx) > lookahead + 8) {
-          queue.splice(i, 1);
-        }
-      }
     }
 
     function decodeFrame(index) {
@@ -232,8 +162,6 @@
       if (loadingSet.has(index)) return Promise.resolve(null);
 
       loadingSet.add(index);
-      const controller = new AbortController();
-      abortControllers.set(index, controller);
 
       if (USE_BITMAP) {
         const resizeOpts =
@@ -245,7 +173,7 @@
               }
             : undefined;
 
-        return fetch(frameSrc(index), { signal: controller.signal })
+        return fetch(frameSrc(index))
           .then((res) => (res.ok ? res.blob() : null))
           .then((blob) => {
             if (!blob) return null;
@@ -256,10 +184,8 @@
           })
           .then((bm) => {
             loadingSet.delete(index);
-            abortControllers.delete(index);
             if (!bm) return null;
 
-            // In case frame was filled while decoding, release redundant bitmap immediately
             if (frames[index] !== null) {
               if (typeof bm.close === 'function') {
                 try { bm.close(); } catch (_) {}
@@ -270,9 +196,7 @@
             frames[index] = bm;
             cachedCount++;
 
-            evictExcessFrames(Math.round(currentFrame));
-
-            // Mark dirty and schedule rAF render instead of drawing directly outside tick loop
+            // Trigger immediate render if this is the frame we're waiting for
             if (Math.abs(currentFrame - index) < 1.5 || lastRenderedPos === -1) {
               needsRender = true;
               scheduleLoop();
@@ -281,7 +205,6 @@
           })
           .catch(() => {
             loadingSet.delete(index);
-            abortControllers.delete(index);
             return null;
           });
       }
@@ -291,11 +214,9 @@
         img.decoding = 'async';
         const onDone = (success) => {
           loadingSet.delete(index);
-          abortControllers.delete(index);
           if (success) {
             frames[index] = img;
             cachedCount++;
-            evictExcessFrames(Math.round(currentFrame));
             if (Math.abs(currentFrame - index) < 1.5 || lastRenderedPos === -1) {
               needsRender = true;
               scheduleLoop();
@@ -348,9 +269,6 @@
     }
 
     function ensureNeighborhood(centerIdx, direction = 1) {
-      pruneQueue(centerIdx, 20);
-      cancelObsoleteRequests(centerIdx);
-
       // Priority 1: Current frame
       requestFrame(centerIdx, true);
 
@@ -365,22 +283,37 @@
         if (forward1 < FRAME_COUNT) requestFrame(forward1, true);
       }
 
-      // Priority 3: Directional lookahead (wider buffer for rapid scroll jumps)
-      const lookahead = 18;
+      // Priority 3: Directional lookahead (buffer ahead in direction of scroll)
+      const lookahead = 24;
       for (let offset = 2; offset <= lookahead; offset++) {
         const primary = direction >= 0 ? centerIdx + offset : centerIdx - offset;
         const secondary = direction >= 0 ? centerIdx - offset : centerIdx + offset;
-        if (primary >= 0 && primary < FRAME_COUNT) requestFrame(primary, false);
-        if (secondary >= 0 && secondary < FRAME_COUNT && offset <= 4) requestFrame(secondary, false);
+        if (primary >= 0 && primary < FRAME_COUNT) requestFrame(primary, true);
+        if (secondary >= 0 && secondary < FRAME_COUNT && offset <= 6) requestFrame(secondary, false);
       }
     }
 
-    function preloadKeyframes() {
-      // Background load a sparse spine (every 10th frame) across all 238 frames
-      for (let i = 0; i < FRAME_COUNT; i += 10) {
+    function preloadAllFrames() {
+      // 1. First priority: keyframes every 5th frame for instant coarse coverage across full page
+      for (let i = 0; i < FRAME_COUNT; i += 5) {
         requestFrame(i, false);
       }
       requestFrame(FRAME_COUNT - 1, false);
+
+      // 2. High-speed progressive stream: decode all remaining frames sequentially in background
+      const streamRemaining = () => {
+        for (let i = 0; i < FRAME_COUNT; i++) {
+          if (frames[i] === null) {
+            requestFrame(i, false);
+          }
+        }
+      };
+
+      if (typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(streamRemaining, { timeout: 600 });
+      } else {
+        setTimeout(streamRemaining, 150);
+      }
     }
 
     function updateLayoutCaches() {
@@ -394,7 +327,8 @@
     }
 
     function scrollYToFrame(scrollY) {
-      const progress = Math.min(1, Math.max(0, (scrollY / maxScrollCache) * SCROLL_ANIM_PACE));
+      const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+      const progress = Math.min(1, Math.max(0, scrollY / maxScroll));
       return progress * (FRAME_COUNT - 1);
     }
 
@@ -501,8 +435,8 @@
         return;
       }
 
-      // Dynamic adaptive easing: responsive when scrolling fast, silky smooth when scrolling slowly
-      const dynamicEase = absDelta > 6 ? 32 : (absDelta > 2 ? 26 : 22);
+      // Snappy and responsive dynamic easing: tracks scroll intent instantly with silky finish
+      const dynamicEase = absDelta > 6 ? 44 : (absDelta > 2 ? 38 : 32);
       const factor = 1 - Math.exp(-dynamicEase * dt);
 
       currentFrame += frameDelta * factor;
@@ -537,9 +471,6 @@
 
       const { isMob, isTablet } = DeviceProfile.detect();
 
-      // Dynamically tune cache capacity based on device capabilities
-      maxCachedFrames = isMob ? 140 : (isTablet ? 185 : 238);
-
       let nextTargetW = 2560;
       let nextTargetH = 1440;
 
@@ -564,13 +495,14 @@
         }
       }
 
-      // If decoding resolution changed, immediately reclaim GPU memory and purge old bitmaps
+      // If decoding resolution changed, immediately clear frames and repopulate full sequence
       const resolutionChanged = (nextTargetW !== decodeTargetW || nextTargetH !== decodeTargetH);
       decodeTargetW = nextTargetW;
       decodeTargetH = nextTargetH;
 
       if (resolutionChanged) {
         clearAllFrames();
+        preloadAllFrames();
       }
 
       // Resize canvas buffer only when physical dimensions change
@@ -614,7 +546,7 @@
       targetFrame = scrollYToFrame(window.scrollY);
       currentFrame = targetFrame;
       resize();
-      preloadKeyframes();
+      preloadAllFrames();
       ensureNeighborhood(Math.round(currentFrame), 1);
     }
 
