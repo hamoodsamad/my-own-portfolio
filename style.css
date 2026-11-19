@@ -32,7 +32,7 @@
 }
 
 html {
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
   background-color: #050308;
   overflow-x: hidden;
   overflow-x: clip;
@@ -185,33 +185,41 @@ body {
   background:
     linear-gradient(
       to bottom,
-      #050308 0%,
-      #050308 11.5%,
-      rgba(5, 3, 8, 0.72) 17%,
-      rgba(5, 3, 8, 0) 28%,
-      rgba(5, 3, 8, 0) 72%,
-      rgba(5, 3, 8, 0.72) 82%,
-      #050308 88%,
-      #050308 100%
-    ),
-    linear-gradient(
-      to right,
-      #050308 0%,
-      #050308 7.5%,
-      rgba(5, 3, 8, 0.65) 13%,
-      rgba(5, 3, 8, 0) 23%,
-      rgba(5, 3, 8, 0) 77%,
-      rgba(5, 3, 8, 0.65) 87%,
-      #050308 92.5%,
-      #050308 100%
+      rgba(5, 3, 8, 0.75) 0%,
+      rgba(5, 3, 8, 0.25) 6%,
+      rgba(5, 3, 8, 0) 14%,
+      rgba(5, 3, 8, 0) 86%,
+      rgba(5, 3, 8, 0.3) 94%,
+      rgba(5, 3, 8, 0.8) 100%
     ),
     radial-gradient(
-      ellipse 72% 72% at 50% 48%,
-      rgba(5, 3, 8, 0.06) 0%,
-      rgba(5, 3, 8, 0.34) 72%,
-      #050308 100%
+      ellipse 88% 82% at 50% 45%,
+      rgba(5, 3, 8, 0) 0%,
+      rgba(5, 3, 8, 0.12) 70%,
+      rgba(5, 3, 8, 0.4) 100%
     );
   transform: translate3d(0, 0, 0);
+}
+
+@media (max-width: 768px) {
+  .canvas-vignette {
+    background:
+      linear-gradient(
+        to bottom,
+        rgba(5, 3, 8, 0.8) 0%,
+        rgba(5, 3, 8, 0.25) 5%,
+        rgba(5, 3, 8, 0) 14%,
+        rgba(5, 3, 8, 0) 85%,
+        rgba(5, 3, 8, 0.4) 94%,
+        rgba(5, 3, 8, 0.85) 100%
+      ),
+      radial-gradient(
+        ellipse 90% 82% at 50% 40%,
+        rgba(5, 3, 8, 0) 0%,
+        rgba(5, 3, 8, 0.15) 75%,
+        rgba(5, 3, 8, 0.45) 100%
+      );
+  }
 }
 
 .page {

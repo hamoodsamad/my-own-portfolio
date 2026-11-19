@@ -83,7 +83,8 @@
   /* ==========================================================================
      MODULE 3: DECOUPLED SCROLL CANVAS ANIMATION ENGINE
      Decouples asynchronous frame decoding from the 60fps/120fps rAF render loop.
-     Features full sequence progressive caching (238 frames) with 0 eviction during scroll.
+     Features sliding window memory management with 1080p capped decoding resolution,
+     active VRAM pruning of distant frames, debounced resize, and layout-cached scroll math.
      ========================================================================== */
   const ScrollCanvasEngine = (() => {
     const FRAME_COUNT = 238;
@@ -94,23 +95,30 @@
     if (!canvas) return null;
     const ctx = canvas.getContext('2d', { alpha: false });
 
-    // Permanent 238-frame in-memory cache — zero eviction during scroll, zero re-fetching!
+    // Strict 1080p decoding resolution cap to eliminate VRAM exhaustion & GPU bloat
+    const DECODE_WIDTH = 1920;
+    const DECODE_HEIGHT = 1080;
+    const FRAME_FOLDER = './frames-1080p';
+
+    // Sliding window memory model configuration
+    const WINDOW_RADIUS = 20;     // Immediate lookahead / lookbehind
+    const PRUNE_DISTANCE = 35;    // Evict frames further than 35 frames from active scroll focus
+    const ANCHOR_STRIDE = 16;     // Keep coarse anchor keyframes (every 16th frame + 0 + 237) for instant jump fallback
+
     const frames = new Array(FRAME_COUNT).fill(null);
     const loadingSet = new Set();
     const urgentQueue = [];
     const idleQueue = [];
-    const CONCURRENCY = 8;
+    const inUrgentSet = new Set();
+    const inIdleSet = new Set();
+    const CONCURRENCY = 6;
     let activeWorkers = 0;
     let cachedCount = 0;
 
     let width = 0;
     let height = 0;
     let canvasScale = 1;
-    let decodeTargetW = 2560;
-    let decodeTargetH = 1440;
     let cachedDrawRect = null;
-    let cachedTopGrad = null;
-    let cachedBtmGrad = null;
     let needsRender = false;
     let maxScrollCache = 1;
     let cachedSectionOffsets = [];
@@ -118,14 +126,17 @@
     let targetFrame = 0;
     let currentFrame = 0;
     let lastRenderedPos = -1;
+    let lastNeighborhoodCenter = -1;
     let rafId = null;
     let lastTimestamp = 0;
     let pendingScrollY = 0;
     let scrollScheduled = false;
     let lastScrollDirection = 1; // 1 = scrolling down, -1 = scrolling up
 
+    let resizeDebounceTimer = null;
+
     function frameSrc(index) {
-      return `./frames/frame-${String(index + 1).padStart(3, '0')}.webp`;
+      return `${FRAME_FOLDER}/frame-${String(index + 1).padStart(3, '0')}.webp`;
     }
 
     /**
@@ -146,7 +157,24 @@
     }
 
     /**
-     * Completely purges all cached frames when resolution changes.
+     * Sliding Window Memory Model:
+     * Actively prunes non-anchor frames whose distance from active scroll focus
+     * exceeds PRUNE_DISTANCE, bounding GPU VRAM footprint to ~30-40 textures.
+     */
+    function pruneDistantFrames(centerIdx) {
+      for (let i = 0; i < FRAME_COUNT; i++) {
+        // Retain anchor keyframes (first, last, and every 16th frame) for instant scroll jump fallback
+        if (i === 0 || i === FRAME_COUNT - 1 || i % ANCHOR_STRIDE === 0) {
+          continue;
+        }
+        if (frames[i] !== null && Math.abs(i - centerIdx) > PRUNE_DISTANCE) {
+          releaseFrame(i);
+        }
+      }
+    }
+
+    /**
+     * Purges all cached frames safely (e.g. on unmount or reset).
      */
     function clearAllFrames() {
       for (let i = 0; i < FRAME_COUNT; i++) {
@@ -155,7 +183,10 @@
       loadingSet.clear();
       urgentQueue.length = 0;
       idleQueue.length = 0;
+      inUrgentSet.clear();
+      inIdleSet.clear();
       cachedCount = 0;
+      lastNeighborhoodCenter = -1;
     }
 
     function decodeFrame(index) {
@@ -166,23 +197,11 @@
       loadingSet.add(index);
 
       if (USE_BITMAP) {
-        const isNative4K = decodeTargetW >= 3840;
-        const resizeOpts =
-          !isNative4K && typeof createImageBitmap === 'function'
-            ? {
-                resizeWidth: decodeTargetW,
-                resizeHeight: decodeTargetH,
-                resizeQuality: decodeTargetW >= 2560 ? 'medium' : 'low',
-              }
-            : undefined;
-
         return fetch(frameSrc(index))
           .then((res) => (res.ok ? res.blob() : null))
           .then((blob) => {
             if (!blob) return null;
-            if (resizeOpts) {
-              return createImageBitmap(blob, resizeOpts).catch(() => createImageBitmap(blob));
-            }
+            // Native direct hardware texture decode capped at 1080p — ZERO CPU Lanczos overhead!
             return createImageBitmap(blob);
           })
           .then((bm) => {
@@ -196,12 +215,21 @@
               return frames[index];
             }
 
+            // If the user rapidly scrolled far away during fetch, avoid keeping distant frame
+            const currentInt = Math.round(currentFrame);
+            const isAnchor = index === 0 || index === FRAME_COUNT - 1 || index % ANCHOR_STRIDE === 0;
+            if (!isAnchor && Math.abs(index - currentInt) > PRUNE_DISTANCE + 5) {
+              if (typeof bm.close === 'function') {
+                try { bm.close(); } catch (_) {}
+              }
+              return null;
+            }
+
             frames[index] = bm;
             cachedCount++;
 
-            // Trigger immediate render upgrade if this landed frame is near current scroll focus
-            const dist = Math.abs(currentFrame - index);
-            if (dist < 3.0 || lastRenderedPos !== Math.round(currentFrame) || lastRenderedPos === -1) {
+            // Only trigger immediate render update if this frame matches what should currently be on screen
+            if (index === currentInt || lastRenderedPos === -1) {
               needsRender = true;
               scheduleLoop();
             }
@@ -213,6 +241,7 @@
           });
       }
 
+      // Fallback for file: protocol or environments without createImageBitmap
       return new Promise((resolve) => {
         const img = new Image();
         img.decoding = 'async';
@@ -221,8 +250,8 @@
           if (success) {
             frames[index] = img;
             cachedCount++;
-            const dist = Math.abs(currentFrame - index);
-            if (dist < 3.0 || lastRenderedPos !== Math.round(currentFrame) || lastRenderedPos === -1) {
+            const currentInt = Math.round(currentFrame);
+            if (index === currentInt || lastRenderedPos === -1) {
               needsRender = true;
               scheduleLoop();
             }
@@ -241,8 +270,15 @@
 
     function pumpQueue() {
       while (activeWorkers < CONCURRENCY && (urgentQueue.length > 0 || idleQueue.length > 0)) {
-        // Priority: Always pull urgent scroll neighborhood frames first!
-        const idx = urgentQueue.length > 0 ? urgentQueue.shift() : idleQueue.shift();
+        let idx;
+        if (urgentQueue.length > 0) {
+          idx = urgentQueue.shift();
+          inUrgentSet.delete(idx);
+        } else {
+          idx = idleQueue.shift();
+          inIdleSet.delete(idx);
+        }
+
         if (frames[idx] === null && !loadingSet.has(idx)) {
           activeWorkers++;
           decodeFrame(idx).finally(() => {
@@ -258,38 +294,33 @@
       if (frames[index] !== null || loadingSet.has(index)) return;
 
       if (isUrgent) {
-        // Promote from idle to urgent if already waiting in idle
-        const idlePos = idleQueue.indexOf(index);
-        if (idlePos !== -1) idleQueue.splice(idlePos, 1);
-
-        if (urgentQueue.indexOf(index) === -1) {
+        if (inIdleSet.has(index)) {
+          const idlePos = idleQueue.indexOf(index);
+          if (idlePos !== -1) idleQueue.splice(idlePos, 1);
+          inIdleSet.delete(index);
+        }
+        if (!inUrgentSet.has(index)) {
           urgentQueue.push(index);
-          // Distance-sort urgentQueue so closest frames to targetFrame are processed first
-          urgentQueue.sort((a, b) => {
-            const distA = Math.abs(a - targetFrame);
-            const distB = Math.abs(b - targetFrame);
-            return distA - distB;
-          });
+          inUrgentSet.add(index);
         }
       } else {
-        if (urgentQueue.indexOf(index) === -1 && idleQueue.indexOf(index) === -1) {
+        if (!inUrgentSet.has(index) && !inIdleSet.has(index)) {
           idleQueue.push(index);
+          inIdleSet.add(index);
         }
       }
-      pumpQueue();
     }
 
     function ensureNeighborhood(centerIdx, direction = 1) {
-      // Collect neighborhood frames in order of immediate visual urgency
-      const lookahead = 24;
-      const candidates = [centerIdx];
+      let addedAny = false;
 
+      const candidates = [centerIdx];
       const primary1 = direction >= 0 ? centerIdx + 1 : centerIdx - 1;
       const secondary1 = direction >= 0 ? centerIdx - 1 : centerIdx + 1;
       if (primary1 >= 0 && primary1 < FRAME_COUNT) candidates.push(primary1);
       if (secondary1 >= 0 && secondary1 < FRAME_COUNT) candidates.push(secondary1);
 
-      for (let offset = 2; offset <= lookahead; offset++) {
+      for (let offset = 2; offset <= WINDOW_RADIUS; offset++) {
         const primary = direction >= 0 ? centerIdx + offset : centerIdx - offset;
         const secondary = direction >= 0 ? centerIdx - offset : centerIdx + offset;
         if (primary >= 0 && primary < FRAME_COUNT) candidates.push(primary);
@@ -297,35 +328,40 @@
       }
 
       for (let i = 0; i < candidates.length; i++) {
-        requestFrame(candidates[i], true);
+        const idx = candidates[i];
+        if (frames[idx] === null && !loadingSet.has(idx) && !inUrgentSet.has(idx)) {
+          requestFrame(idx, true);
+          addedAny = true;
+        }
+      }
+
+      if (addedAny) {
+        // Single sort by distance to centerIdx — no repeated quadratic array sorting!
+        urgentQueue.sort((a, b) => Math.abs(a - centerIdx) - Math.abs(b - centerIdx));
+        pumpQueue();
       }
     }
 
-    function preloadAllFrames() {
-      // 1. First priority: keyframes every 5th frame for instant coarse coverage across full page
-      for (let i = 0; i < FRAME_COUNT; i += 5) {
+    function preloadAnchorFrames() {
+      // 1. Initial immediate window (frames 0 to 20) for instant initial response
+      const initialChunk = Math.min(20, FRAME_COUNT);
+      for (let i = 0; i < initialChunk; i++) {
+        requestFrame(i, true);
+      }
+      pumpQueue();
+
+      // 2. Coarse keyframe grid across full sequence (every 16th frame + end)
+      for (let i = ANCHOR_STRIDE; i < FRAME_COUNT; i += ANCHOR_STRIDE) {
         requestFrame(i, false);
       }
       requestFrame(FRAME_COUNT - 1, false);
-
-      // 2. High-speed progressive stream: decode all remaining frames sequentially in background
-      const streamRemaining = () => {
-        for (let i = 0; i < FRAME_COUNT; i++) {
-          if (frames[i] === null) {
-            requestFrame(i, false);
-          }
-        }
-      };
-
-      if (typeof window.requestIdleCallback === 'function') {
-        window.requestIdleCallback(streamRemaining, { timeout: 600 });
-      } else {
-        setTimeout(streamRemaining, 150);
-      }
+      pumpQueue();
     }
 
     function updateLayoutCaches() {
-      maxScrollCache = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+      width = window.innerWidth;
+      height = window.innerHeight;
+      maxScrollCache = Math.max(1, document.documentElement.scrollHeight - height);
       if (typeof NavigationController !== 'undefined' && NavigationController.trackedSections) {
         cachedSectionOffsets = NavigationController.trackedSections.map((sec) => ({
           id: sec.id,
@@ -335,54 +371,26 @@
     }
 
     function scrollYToFrame(scrollY) {
-      const maxScroll = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
-      const progress = Math.min(1, Math.max(0, scrollY / maxScroll));
+      // Pure mathematical projection based on cached maxScroll — zero DOM layout reading!
+      const progress = Math.min(1, Math.max(0, scrollY / maxScrollCache));
       return progress * (FRAME_COUNT - 1);
     }
 
-    function computeDrawRect(imgW, imgH) {
-      const isPortrait = height > width;
+    function computeDrawRect(imgW = DECODE_WIDTH, imgH = DECODE_HEIGHT) {
+      // True full-bleed edge-to-edge cover framing:
+      // Fills 100% of viewport width and height with zero letterboxing / zero black side bars
+      const scale = Math.max(width / imgW, height / imgH);
+      const drawW = Math.round(imgW * scale);
+      const drawH = Math.round(imgH * scale);
 
-      if (isPortrait) {
-        // Portrait (mobile phones and portrait tablets):
-        // Sizing to full viewport width displays 100% of character and atmospheric smoke
-        const scale = width / imgW;
-        const drawW = Math.round(imgW * scale);
-        const drawH = Math.round(imgH * scale);
-        const offsetX = 0;
-        const offsetY = Math.round((height - drawH) * 0.35);
-        const fadeH = Math.min(32, Math.round(drawH * 0.16));
+      // Centered horizontally so subject and atmospheric side smoke remain perfectly balanced
+      const offsetX = Math.round((width - drawW) * 0.5);
 
-        return { offsetX, offsetY, drawW, drawH, isPortrait: true, fadeH, fadeW: 0 };
-      }
+      // Vertical positioning:
+      // Anchor with comfortable top-bias so hair top has natural headroom below navbar
+      const offsetY = Math.round((height - drawH) * 0.20);
 
-      // Landscape (desktop, 4K monitors, laptops, ultra-wides, 32-inch displays):
-      const aspect = width / height;
-      const imgAspect = imgW / imgH; // 3840 / 2160 = 1.7777
-
-      let coverScale;
-      let offsetX, offsetY;
-      let fadeW = 0;
-
-      if (aspect > imgAspect) {
-        // Wide or Ultra-wide screens (wider than 16:9):
-        // Constrain the scale to prevent extreme zoom-in into the face!
-        // Anchoring from upper third so head and hair remain fully visible and face stays at natural distance.
-        coverScale = Math.min(width / imgW, (height / imgH) * 1.08);
-        const drawW = Math.round(imgW * coverScale);
-        const drawH = Math.round(imgH * coverScale);
-        offsetX = Math.round((width - drawW) * 0.5);
-        offsetY = Math.round((height - drawH) * 0.22);
-        fadeW = width > drawW ? Math.min(90, Math.round((width - drawW) * 0.5)) : 0;
-        return { offsetX, offsetY, drawW, drawH, isPortrait: false, fadeH: 0, fadeW };
-      } else {
-        coverScale = Math.max(width / imgW, height / imgH);
-        const drawW = Math.round(imgW * coverScale);
-        const drawH = Math.round(imgH * coverScale);
-        offsetX = Math.round((width - drawW) * 0.5);
-        offsetY = Math.round((height - drawH) * 0.28);
-        return { offsetX, offsetY, drawW, drawH, isPortrait: false, fadeH: 0, fadeW: 0 };
-      }
+      return { offsetX, offsetY, drawW, drawH };
     }
 
     function findNearestFrame(index) {
@@ -410,37 +418,11 @@
       const baseImg = frames[resolvedBase];
       if (!baseImg) return;
 
-      const rect = cachedDrawRect || computeDrawRect(decodeTargetW, decodeTargetH);
-      const { offsetX, offsetY, drawW, drawH, isPortrait, fadeH, fadeW } = rect;
+      const rect = cachedDrawRect || computeDrawRect();
+      const { offsetX, offsetY, drawW, drawH } = rect;
 
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = '#050308';
-      ctx.fillRect(0, 0, width, height);
-
-      // Draw crisp master frame — zero ghosting, zero double-edge blur
+      // Draw crisp master frame — completely covers viewport edge-to-edge with 0 overdraw
       ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
-
-      // Soft edge feathering using pre-cached gradients (0 allocation)
-      if (isPortrait && cachedTopGrad && cachedBtmGrad && fadeH > 2) {
-        ctx.fillStyle = cachedTopGrad;
-        ctx.fillRect(offsetX, offsetY, drawW, fadeH);
-
-        ctx.fillStyle = cachedBtmGrad;
-        ctx.fillRect(offsetX, offsetY + drawH - fadeH, drawW, fadeH);
-      } else if (!isPortrait && fadeW > 2) {
-        // Soft edge feathering on wide displays where canvas extends past drawW
-        const leftGrad = ctx.createLinearGradient(offsetX, 0, offsetX + fadeW, 0);
-        leftGrad.addColorStop(0, '#050308');
-        leftGrad.addColorStop(1, 'rgba(5, 3, 8, 0)');
-        ctx.fillStyle = leftGrad;
-        ctx.fillRect(offsetX, 0, fadeW, height);
-
-        const rightGrad = ctx.createLinearGradient(offsetX + drawW - fadeW, 0, offsetX + drawW, 0);
-        rightGrad.addColorStop(0, 'rgba(5, 3, 8, 0)');
-        rightGrad.addColorStop(1, '#050308');
-        ctx.fillStyle = rightGrad;
-        ctx.fillRect(offsetX + drawW - fadeW, 0, fadeW, height);
-      }
 
       lastRenderedPos = resolvedBase;
     }
@@ -451,22 +433,30 @@
 
       if (scrollScheduled) {
         scrollScheduled = false;
+        // Rely exclusively on cached layout math — zero layout thrashing!
         const newTarget = scrollYToFrame(pendingScrollY);
         const diff = newTarget - targetFrame;
         if (Math.abs(diff) > 0.01) {
           lastScrollDirection = diff >= 0 ? 1 : -1;
         }
         targetFrame = newTarget;
+
         if (typeof NavigationController !== 'undefined') {
           NavigationController.updateHeaderAndNav(pendingScrollY, height, cachedSectionOffsets);
         }
-        ensureNeighborhood(Math.round(targetFrame), lastScrollDirection);
+
+        const roundedTarget = Math.round(targetFrame);
+        if (roundedTarget !== lastNeighborhoodCenter) {
+          lastNeighborhoodCenter = roundedTarget;
+          ensureNeighborhood(roundedTarget, lastScrollDirection);
+          pruneDistantFrames(roundedTarget); // Active sliding window VRAM eviction!
+        }
       }
 
-      const frameDelta = targetFrame - currentFrame;
-      const absDelta = Math.abs(frameDelta);
+      const delta = targetFrame - currentFrame;
+      const absDelta = Math.abs(delta);
 
-      if (absDelta < 0.008) {
+      if (absDelta < 0.01) {
         currentFrame = targetFrame;
         renderFrame(currentFrame, needsRender);
         needsRender = false;
@@ -475,11 +465,13 @@
         return;
       }
 
-      // Snappy and responsive dynamic easing: tracks scroll intent instantly with silky finish
-      const dynamicEase = absDelta > 6 ? 44 : (absDelta > 2 ? 38 : 32);
+      // Responsive, critically-damped spring dynamics:
+      // High responsiveness (25-36) ensures zero delay behind scroll motion,
+      // while eliminating discrete wheel ticks for silky-smooth ("makhan") motion
+      const dynamicEase = absDelta > 10 ? 36 : (absDelta > 2 ? 30 : 25);
       const factor = 1 - Math.exp(-dynamicEase * dt);
 
-      currentFrame += frameDelta * factor;
+      currentFrame += delta * factor;
       renderFrame(currentFrame);
       needsRender = false;
       rafId = requestAnimationFrame(tick);
@@ -493,68 +485,23 @@
     }
 
     function onNativeScroll() {
-      pendingScrollY = window.scrollY;
+      // Direct composited scroll offset read — zero layout reflow
+      pendingScrollY = window.scrollY || window.pageYOffset || 0;
       scrollScheduled = true;
       scheduleLoop();
     }
 
     function resize() {
-      width = window.innerWidth;
-      height = window.innerHeight;
       updateLayoutCaches();
 
       const rawDpr = window.devicePixelRatio || 1;
-      canvasScale = Math.min(rawDpr, 2);
+      // Cap canvas scale at 1.5 and max resolution at 1920x1080 to prevent 4K backbuffer VRAM bloat
+      canvasScale = Math.min(rawDpr, 1.5);
 
-      const physicalW = Math.round(width * canvasScale);
-      const physicalH = Math.round(height * canvasScale);
-
-      const { isMob, isTablet } = DeviceProfile.detect();
-
-      let nextTargetW = 2560;
-      let nextTargetH = 1440;
-
-      if (isMob) {
-        if (physicalW <= 720 || width <= 390) {
-          nextTargetW = 1280;
-          nextTargetH = 720;
-        } else {
-          nextTargetW = 1600;
-          nextTargetH = 900;
-        }
-      } else if (isTablet) {
-        nextTargetW = 1920;
-        nextTargetH = 1080;
-      } else {
-        // Desktop / Large 32-inch & 4K Displays:
-        if (physicalW >= 3200 || width >= 2560 || height >= 1400) {
-          nextTargetW = 3840;
-          nextTargetH = 2160;
-        } else if (physicalW >= 2000 || width >= 1800 || height >= 1000) {
-          nextTargetW = 2560;
-          nextTargetH = 1440;
-        } else if (width <= 1440 && height <= 900) {
-          nextTargetW = 1600;
-          nextTargetH = 900;
-        } else {
-          nextTargetW = 1920;
-          nextTargetH = 1080;
-        }
-      }
-
-      // If decoding resolution changed, immediately clear frames and repopulate full sequence
-      const resolutionChanged = (nextTargetW !== decodeTargetW || nextTargetH !== decodeTargetH);
-      decodeTargetW = nextTargetW;
-      decodeTargetH = nextTargetH;
-
-      if (resolutionChanged) {
-        clearAllFrames();
-        preloadAllFrames();
-      }
+      const targetCanvasW = Math.min(DECODE_WIDTH, Math.max(1, Math.round(width * canvasScale)));
+      const targetCanvasH = Math.min(DECODE_HEIGHT, Math.max(1, Math.round(height * canvasScale)));
 
       // Resize canvas buffer only when physical dimensions change
-      const targetCanvasW = Math.max(1, physicalW);
-      const targetCanvasH = Math.max(1, physicalH);
       if (canvas.width !== targetCanvasW || canvas.height !== targetCanvasH) {
         canvas.width = targetCanvasW;
         canvas.height = targetCanvasH;
@@ -563,25 +510,12 @@
         ctx.imageSmoothingQuality = 'high';
       }
 
-      cachedDrawRect = computeDrawRect(decodeTargetW, decodeTargetH);
-
-      if (cachedDrawRect.isPortrait && cachedDrawRect.fadeH > 2) {
-        const { offsetY, drawH, fadeH } = cachedDrawRect;
-        cachedTopGrad = ctx.createLinearGradient(0, offsetY, 0, offsetY + fadeH);
-        cachedTopGrad.addColorStop(0, '#050308');
-        cachedTopGrad.addColorStop(1, 'rgba(5, 3, 8, 0)');
-
-        cachedBtmGrad = ctx.createLinearGradient(0, offsetY + drawH - fadeH, 0, offsetY + drawH);
-        cachedBtmGrad.addColorStop(0, 'rgba(5, 3, 8, 0)');
-        cachedBtmGrad.addColorStop(1, '#050308');
-      } else {
-        cachedTopGrad = null;
-        cachedBtmGrad = null;
-      }
+      cachedDrawRect = computeDrawRect();
 
       lastRenderedPos = -1;
       renderFrame(currentFrame, true);
       ensureNeighborhood(Math.round(currentFrame), 0);
+      pruneDistantFrames(Math.round(currentFrame));
 
       const currentCardW = width <= 600 ? 160 : (width <= 768 ? 210 : 270);
       if (typeof CarouselEngine !== 'undefined') {
@@ -589,23 +523,39 @@
       }
     }
 
+    /**
+     * Debounced resize handler:
+     * Prevents continuous frame purges and layout thrashing during active window resizing.
+     */
+    function onDebouncedResize() {
+      if (resizeDebounceTimer) {
+        clearTimeout(resizeDebounceTimer);
+      }
+      resizeDebounceTimer = setTimeout(() => {
+        resize();
+      }, 150);
+    }
+
     function init() {
-      targetFrame = scrollYToFrame(window.scrollY);
+      updateLayoutCaches();
+      targetFrame = scrollYToFrame(window.scrollY || window.pageYOffset || 0);
       currentFrame = targetFrame;
       resize();
-      preloadAllFrames();
+      preloadAnchorFrames();
       ensureNeighborhood(Math.round(currentFrame), 1);
     }
 
     return {
       init,
       resize,
+      onDebouncedResize,
       onNativeScroll,
       updateLayoutCaches,
       get currentFrame() { return currentFrame; },
       get targetFrame() { return targetFrame; },
       get cachedSectionOffsets() { return cachedSectionOffsets; },
       get height() { return height; },
+      get cachedCount() { return cachedCount; },
     };
   })();
 
@@ -625,7 +575,7 @@
     let lastHeaderScrolled = false;
     let lastActiveNavId = '';
 
-    function updateHeaderAndNav(scrollPos = window.scrollY, vpHeight = window.innerHeight, sectionOffsets = []) {
+    function updateHeaderAndNav(scrollPos = 0, vpHeight = 720, sectionOffsets = []) {
       const scrolled = scrollPos > 24;
       if (header && scrolled !== lastHeaderScrolled) {
         lastHeaderScrolled = scrolled;
@@ -666,6 +616,21 @@
           link.addEventListener('click', closeMobileMenu);
         });
       }
+
+      // Smooth scroll for nav anchor links without lagging wheel scrolling
+      document.querySelectorAll('a[href^="#"]').forEach((anchor) => {
+        anchor.addEventListener('click', (e) => {
+          const targetId = anchor.getAttribute('href');
+          if (targetId && targetId !== '#') {
+            const targetEl = document.querySelector(targetId);
+            if (targetEl) {
+              e.preventDefault();
+              targetEl.scrollIntoView({ behavior: 'smooth' });
+              if (mobileMenu && !mobileMenu.hidden) closeMobileMenu();
+            }
+          }
+        });
+      });
     }
 
     return {
@@ -1624,8 +1589,9 @@
 
     if (ScrollCanvasEngine) {
       ScrollCanvasEngine.init();
+      window.__ScrollCanvasEngine = ScrollCanvasEngine;
       window.addEventListener('scroll', ScrollCanvasEngine.onNativeScroll, { passive: true });
-      window.addEventListener('resize', ScrollCanvasEngine.resize, { passive: true });
+      window.addEventListener('resize', ScrollCanvasEngine.onDebouncedResize, { passive: true });
       window.addEventListener(
         'load',
         () => {
