@@ -96,15 +96,44 @@
     if (!canvas) return null;
     const ctx = canvas.getContext('2d', { alpha: false });
 
-    // Strict 1080p decoding resolution cap to eliminate VRAM exhaustion & GPU bloat
-    const DECODE_WIDTH = 1920;
-    const DECODE_HEIGHT = 1080;
-    const FRAME_FOLDER = './frames-1080p';
+    // Dynamic multi-tier asset loader:
+    // Tier 1 (4K / Ultra-wide / 32-inch displays): loads original 3840x2160 master frames from './frames'
+    // Tier 2 (Laptops, Tablets, Phones): loads optimized 1920x1080 frames from './frames-1080p'
+    let currentFrameFolder = './frames-1080p';
+    let currentDecodeW = 1920;
+    let currentDecodeH = 1080;
+    let currentTier = '1080p';
+
+    function detectAssetTier() {
+      const rawDpr = window.devicePixelRatio || 1;
+      // 4K displays (3840px), 1440p (2560px), Ultra-wides (3440px), or high-DPI displays wider than 1800px
+      if (window.innerWidth > 1920 || (window.innerWidth >= 1800 && rawDpr > 1.25)) {
+        return '4k';
+      }
+      return '1080p';
+    }
+
+    function updateAssetTier() {
+      const tier = detectAssetTier();
+      if (tier === currentTier) return false;
+      currentTier = tier;
+      if (tier === '4k') {
+        currentFrameFolder = './frames';
+        currentDecodeW = 3840;
+        currentDecodeH = 2160;
+      } else {
+        currentFrameFolder = './frames-1080p';
+        currentDecodeW = 1920;
+        currentDecodeH = 1080;
+      }
+      clearAllFrames();
+      return true;
+    }
 
     // Sliding window memory model configuration
     const WINDOW_RADIUS = 20;     // Immediate lookahead / lookbehind
     const PRUNE_DISTANCE = 35;    // Evict frames further than 35 frames from active scroll focus
-    const ANCHOR_STRIDE = 16;     // Keep coarse anchor keyframes (every 16th frame + 0 + 237) for instant jump fallback
+    const ANCHOR_STRIDE = 10;     // Retain 24 permanent anchor keyframes across sequence for instant jump fallback
     // Throttle prune to only fire when center moves ≥ this many frames — avoids 238-iter scan every rAF tick
     const PRUNE_THROTTLE = 5;
 
@@ -147,7 +176,7 @@
     let resizeDebounceTimer = null;
 
     function frameSrc(index) {
-      return `${FRAME_FOLDER}/frame-${String(index + 1).padStart(3, '0')}.webp`;
+      return `${currentFrameFolder}/frame-${String(index + 1).padStart(3, '0')}.webp`;
     }
 
     /**
@@ -178,7 +207,7 @@
       if (Math.abs(centerIdx - lastPrunedCenter) < PRUNE_THROTTLE) return;
       lastPrunedCenter = centerIdx;
       for (let i = 0; i < FRAME_COUNT; i++) {
-        // Retain anchor keyframes (first, last, and every 16th frame) for instant scroll jump fallback
+        // Retain anchor keyframes (first, last, and every 10th frame) for instant scroll jump fallback
         if (i === 0 || i === FRAME_COUNT - 1 || i % ANCHOR_STRIDE === 0) {
           continue;
         }
@@ -217,11 +246,8 @@
           .then((res) => (res.ok ? res.blob() : null))
           .then((blob) => {
             if (!blob) return null;
-            // Native hardware-accelerated decode capped to 1920×1080 — ZERO CPU Lanczos overhead!
-            // resizeWidth/resizeHeight instruct the browser to decode directly into a
-            // 1080p-sized ImageBitmap, keeping GPU VRAM lean on 4K / HiDPI devices.
-            const bitmapOpts = { resizeWidth: DECODE_WIDTH, resizeHeight: DECODE_HEIGHT, resizeQuality: 'medium', imageOrientation: 'none' };
-            return createImageBitmap(blob, bitmapOpts).catch(() => createImageBitmap(blob));
+            // Native zero-copy GPU texture creation directly from Blob — ZERO CPU software downscaling overhead!
+            return createImageBitmap(blob);
           })
           .then((bm) => {
             loadingSet.delete(index);
@@ -408,40 +434,54 @@
       return progress * (FRAME_COUNT - 1);
     }
 
-    function computeDrawRect(imgW = DECODE_WIDTH, imgH = DECODE_HEIGHT) {
-      const isPortrait = height > width * 1.15 || width <= 768;
+    function computeDrawRect(imgW, imgH) {
+      const activeW = imgW || currentDecodeW;
+      const activeH = imgH || currentDecodeH;
 
-      if (!isPortrait) {
-        // Landscape / Desktop & Laptop Framing:
-        // True full-bleed edge-to-edge cover framing with 20% vertical top-bias
-        const scale = Math.max(width / imgW, height / imgH);
-        const drawW = Math.round(imgW * scale);
-        const drawH = Math.round(imgH * scale);
-        const offsetX = Math.round((width - drawW) * 0.5);
-        const offsetY = Math.round((height - drawH) * 0.20);
-        return { offsetX, offsetY, drawW, drawH, isPortrait: false };
+      const isPhonePortrait = width < 600 || (width < 768 && height > width * 1.15);
+      const isTabletPortrait = !isPhonePortrait && (width < 1024 && height > width);
+
+      if (isPhonePortrait) {
+        // TIER 1: Phone Portrait (iPhone, Pixel, Galaxy, etc.)
+        // Natural portrait scale: head height ~28% of viewport height (eliminates 400% ear zoom)
+        // Subject comfortably seated under mobile navbar; edge-to-edge width with zero black side bars.
+        const scale = Math.min(Math.max(width / 720, height / 1650), 0.56);
+        const drawW = activeW * scale;
+        const drawH = activeH * scale;
+
+        const progress = Math.min(1, Math.max(0, currentFrame / (FRAME_COUNT - 1)));
+        const subjectAnchorX = 820 + progress * 140;
+        const offsetX = width * 0.50 - subjectAnchorX * scale;
+        const targetHeadTop = Math.max(64, height * 0.08);
+        const offsetY = targetHeadTop - 80 * scale;
+
+        return { offsetX, offsetY, drawW, drawH, mode: 'phone-portrait' };
       }
 
-      // Portrait / Mobile Framing:
-      // Prevent 400% zoom-in on the ear!
-      // Scale subject naturally so head is ~24%–26% of viewport height (not 50%+).
-      const scale = Math.min(Math.max(width / 700, height / 1600), 0.62);
-      const drawW = Math.round(imgW * scale);
-      const drawH = Math.round(imgH * scale);
+      if (isTabletPortrait) {
+        // TIER 2: Tablet Portrait (iPad, Galaxy Tab, Foldables)
+        // Balanced framing with 12% headroom, subject centered in upper third
+        const scale = Math.max((width / activeW) * 1.05, (height / activeH) * 0.88);
+        const drawW = activeW * scale;
+        const drawH = activeH * scale;
 
-      // Adaptive horizontal tracking:
-      // In 1920x1080 frames, subject moves gently from profile (x=790) to frontal center (x=950).
-      // Placing subjectAnchorX at 50% of viewport width keeps the face centered on the phone screen!
-      const progress = Math.min(1, Math.max(0, currentFrame / (FRAME_COUNT - 1)));
-      const subjectAnchorX = 790 + progress * 160;
-      const offsetX = Math.round(width * 0.50 - subjectAnchorX * scale);
+        const progress = Math.min(1, Math.max(0, currentFrame / (FRAME_COUNT - 1)));
+        const subjectAnchorX = 860 + progress * 100;
+        const offsetX = width * 0.50 - subjectAnchorX * scale;
+        const offsetY = (height - drawH) * 0.14;
 
-      // Vertical position:
-      // Place top of hair comfortably below mobile navbar with natural headroom
-      const targetHeadTop = Math.max(76, Math.round(height * 0.10));
-      const offsetY = Math.round(targetHeadTop - 150 * scale);
+        return { offsetX, offsetY, drawW, drawH, mode: 'tablet-portrait' };
+      }
 
-      return { offsetX, offsetY, drawW, drawH, isPortrait: true };
+      // TIER 3 & 4: Laptop, Desktop, Ultra-wide & 4K Displays
+      // True full-bleed edge-to-edge cover framing with 20% vertical top-bias
+      const scale = Math.max(width / activeW, height / activeH);
+      const drawW = activeW * scale;
+      const drawH = activeH * scale;
+      const offsetX = (width - drawW) * 0.5;
+      const offsetY = (height - drawH) * 0.20;
+
+      return { offsetX, offsetY, drawW, drawH, mode: 'cover' };
     }
 
     function findNearestFrame(index) {
@@ -475,16 +515,40 @@
       // On portrait / mobile, recompute drawRect when currentFrame moves so subject stays centered
       const isPortrait = height > width * 1.15 || width <= 768;
       const rect = isPortrait ? computeDrawRect() : (cachedDrawRect || computeDrawRect());
-      const { offsetX, offsetY, drawW, drawH } = rect;
+      const { offsetX, offsetY, drawW, drawH, mode } = rect;
 
-      // On portrait / mobile, clear canvas with deep background color
-      if (isPortrait) {
+      if (mode === 'phone-portrait' || mode === 'tablet-portrait') {
+        // Luxury deep background fill
         ctx.fillStyle = '#050308';
         ctx.fillRect(0, 0, width, height);
-      }
 
-      // Draw crisp frame
-      ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
+        // Draw crisp frame with hardware sub-pixel positioning
+        ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
+
+        // Top soft fade under navbar
+        const topFadeH = Math.min(100, Math.round(height * 0.12));
+        const topGrad = ctx.createLinearGradient(0, 0, 0, topFadeH);
+        topGrad.addColorStop(0, '#050308');
+        topGrad.addColorStop(0.5, 'rgba(5, 3, 8, 0.7)');
+        topGrad.addColorStop(1, 'rgba(5, 3, 8, 0)');
+        ctx.fillStyle = topGrad;
+        ctx.fillRect(0, 0, width, topFadeH);
+
+        // Bottom soft fade: torso dissolves seamlessly into pure #050308
+        const botFadeY = Math.max(0, offsetY + drawH - 180);
+        const botFadeH = height - botFadeY;
+        if (botFadeH > 0) {
+          const botGrad = ctx.createLinearGradient(0, botFadeY, 0, height);
+          botGrad.addColorStop(0, 'rgba(5, 3, 8, 0)');
+          botGrad.addColorStop(0.4, 'rgba(5, 3, 8, 0.65)');
+          botGrad.addColorStop(1, '#050308');
+          ctx.fillStyle = botGrad;
+          ctx.fillRect(0, botFadeY, width, botFadeH);
+        }
+      } else {
+        // Landscape / Cover: edge-to-edge rasterization
+        ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
+      }
 
       lastRenderedPos = resolvedBase;
     }
@@ -535,7 +599,7 @@
       const delta = targetFrame - currentFrame;
       const absDelta = Math.abs(delta);
 
-      if (absDelta < 0.01) {
+      if (absDelta < 0.005) {
         currentFrame = targetFrame;
         renderFrame(currentFrame, needsRender);
         needsRender = false;
@@ -547,8 +611,8 @@
       // Responsive, critically-damped spring dynamics:
       // High responsiveness on mobile ensures zero drag behind finger flicks
       const isMob = width < 768 || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 1 && width < 1024);
-      const baseEase = isMob ? 38 : 28;
-      const dynamicEase = absDelta > 10 ? (isMob ? 48 : 34) : (absDelta > 2 ? baseEase : 24);
+      const baseEase = isMob ? 40 : 26;
+      const dynamicEase = absDelta > 10 ? (isMob ? 50 : 34) : (absDelta > 2 ? baseEase : (isMob ? 34 : 22));
       const factor = 1 - Math.exp(-dynamicEase * dt);
 
       currentFrame += delta * factor;
@@ -589,14 +653,19 @@
 
     function resize() {
       updateLayoutCaches();
+      const tierChanged = updateAssetTier();
 
       const rawDpr = window.devicePixelRatio || 1;
       const isMob = width < 768 || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 1 && width < 1024);
-      // On mobile devices, cap DPR at 1.25 to prevent GPU thermal throttling and fillrate lagging
-      canvasScale = isMob ? Math.min(rawDpr, 1.25) : Math.min(rawDpr, 1.5);
+      const is4K = currentTier === '4k';
 
-      const targetCanvasW = Math.min(DECODE_WIDTH, Math.max(1, Math.round(width * canvasScale)));
-      const targetCanvasH = Math.min(DECODE_HEIGHT, Math.max(1, Math.round(height * canvasScale)));
+      // On 4K displays: allow full 2.0 DPR scaling up to 3840x2160 native buffer
+      // On desktop/laptop: cap at 1.5 DPR up to 1920x1080
+      // On mobile: cap at 1.25 DPR for GPU thermal efficiency
+      canvasScale = is4K ? Math.min(rawDpr, 2.0) : (isMob ? Math.min(rawDpr, 1.25) : Math.min(rawDpr, 1.5));
+
+      const targetCanvasW = Math.min(currentDecodeW, Math.max(1, Math.round(width * canvasScale)));
+      const targetCanvasH = Math.min(currentDecodeH, Math.max(1, Math.round(height * canvasScale)));
 
       // Resize canvas buffer only when physical dimensions change
       if (canvas.width !== targetCanvasW || canvas.height !== targetCanvasH) {
@@ -612,6 +681,11 @@
 
       lastRenderedPos = -1;
       renderFrame(currentFrame, true);
+
+      if (tierChanged) {
+        preloadAnchorFrames();
+      }
+
       ensureNeighborhood(Math.round(currentFrame), 0);
       pruneDistantFrames(Math.round(currentFrame));
 
