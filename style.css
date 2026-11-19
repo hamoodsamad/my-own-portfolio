@@ -2052,10 +2052,12 @@ a.contact-card:hover {
 }
 
 .contact-card-value {
-  font-size: clamp(0.86rem, 1.1vw, 0.98rem);
+  font-size: clamp(0.82rem, 1.0vw, 0.98rem);
   font-weight: 600;
   color: #ffffff;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .contact-cta-row {
@@ -2314,6 +2316,14 @@ a.contact-card:hover {
   }
 }
 
+@media (max-width: 880px) {
+  .contact-inner {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 32px;
+  }
+}
+
 @media (max-width: 820px) {
   .nav-links,
   .nav-right > .cta-btn {
@@ -2343,7 +2353,6 @@ a.contact-card:hover {
   }
 
   .about-inner,
-  .contact-inner,
   .about-pillars {
     grid-template-columns: minmax(0, 1fr);
     align-items: start;
