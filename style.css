@@ -1481,16 +1481,17 @@ button {
   width: 270px;
   height: 360px;
   border-radius: 18px;
-  background: rgba(18, 14, 26, 0.9);
-  backdrop-filter: blur(20px);
+  background: rgba(18, 14, 26, 0.94);
   border: 1px solid rgba(255, 255, 255, 0.13);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
   overflow: hidden;
   display: flex;
   flex-direction: column;
   transform-style: preserve-3d;
-  transition: opacity 0.35s ease, filter 0.35s ease, border-color 0.35s ease, box-shadow 0.35s ease;
-  backface-visibility: visible;
+  contain: layout paint;
+  will-change: transform, opacity;
+  transition: border-color 0.25s ease, box-shadow 0.25s ease;
+  backface-visibility: hidden;
   cursor: pointer;
 }
 

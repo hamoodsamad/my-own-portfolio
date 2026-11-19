@@ -605,6 +605,10 @@
   let slotCount = 1;
   let slotAngleStep = 360;
   let lastCylinderCardW = -1;
+  let cachedDotEls = [];
+  let lastClosestIndex = -1;
+  let isCarouselInView = false;
+  let carouselObserver = null;
 
   function formatCategoryTitle(cat) {
     if (cat === 'ALL') return 'All Categories';
@@ -702,7 +706,10 @@
   });
 
   function updateCarouselPhysics() {
-    if (!carouselCylinder || carouselItems.length === 0) return;
+    if (!isCarouselInView || !carouselCylinder || carouselItems.length === 0) {
+      carouselRaf = null;
+      return;
+    }
 
     if (!isDragging && !isHovered && slotCount > 1) {
       targetAngle -= autoSpinSpeed;
@@ -718,7 +725,9 @@
     let closestIndex = 0;
     let minAngularDist = 999;
 
-    carouselItems.forEach((item, idx) => {
+    const itemCount = carouselItems.length;
+    for (let i = 0; i < itemCount; i++) {
+      const item = carouselItems[i];
       // Calculate normalized angle relative to viewer (-180 to +180)
       const rawTheta = (item.baseAngle + currentAngle) % 360;
       const theta = ((rawTheta + 540) % 360) - 180;
@@ -727,9 +736,29 @@
       const rad = (theta * Math.PI) / 180;
       const cosVal = Math.cos(rad);
 
+      // Backface Culling: Cull cards completely facing away from viewer (cosVal < -0.05)
+      if (cosVal < -0.05) {
+        if (item.isVisible) {
+          item.el.style.visibility = 'hidden';
+          item.el.style.pointerEvents = 'none';
+          item.isVisible = false;
+        }
+        continue;
+      }
+
+      // Restore visibility if card was previously culled
+      if (!item.isVisible) {
+        item.el.style.visibility = '';
+        item.isVisible = true;
+      }
+
       // Facing front: within half a step
       const isFront = absTheta <= halfStep;
-      item.el.classList.toggle('is-active', isFront);
+      if (item.isActive !== isFront) {
+        item.isActive = isFront;
+        item.el.classList.toggle('is-active', isFront);
+        item.el.style.pointerEvents = isFront ? 'auto' : 'none';
+      }
 
       if (absTheta < minAngularDist) {
         minAngularDist = absTheta;
@@ -737,27 +766,29 @@
       }
 
       // Smooth depth perspective: front card full opacity, back cards curve gracefully into depth
-      const depthOpacity = Math.max(0.35, Math.min(1, 0.4 + 0.6 * cosVal));
-      const depthBrightness = Math.max(0.42, Math.min(1, 0.45 + 0.55 * cosVal));
+      const depthOpacity = Math.round(Math.max(0.35, Math.min(1, 0.4 + 0.6 * cosVal)) * 100) / 100;
+      if (item.lastOpacity !== depthOpacity) {
+        item.lastOpacity = depthOpacity;
+        item.el.style.opacity = String(depthOpacity);
+      }
+    }
 
-      item.el.style.opacity = String(depthOpacity);
-      item.el.style.filter = `brightness(${depthBrightness.toFixed(2)})`;
-      item.el.style.pointerEvents = isFront ? 'auto' : 'none';
-    });
-
-    // Update pagination dots
-    if (carouselDots) {
-      const dots = carouselDots.querySelectorAll('.carousel-dot');
-      dots.forEach((dot, dIdx) => {
-        dot.classList.toggle('is-active', dIdx === closestIndex);
-      });
+    // Update pagination dots only when closestIndex changes
+    if (closestIndex !== lastClosestIndex && cachedDotEls.length > 0) {
+      if (lastClosestIndex >= 0 && cachedDotEls[lastClosestIndex]) {
+        cachedDotEls[lastClosestIndex].classList.remove('is-active');
+      }
+      if (cachedDotEls[closestIndex]) {
+        cachedDotEls[closestIndex].classList.add('is-active');
+      }
+      lastClosestIndex = closestIndex;
     }
 
     carouselRaf = requestAnimationFrame(updateCarouselPhysics);
   }
 
   function startCarouselLoop() {
-    if (carouselRaf === null) {
+    if (carouselRaf === null && isCarouselInView) {
       carouselRaf = requestAnimationFrame(updateCarouselPhysics);
     }
   }
@@ -769,6 +800,44 @@
     }
   }
 
+  function initCarouselVisibilityObserver() {
+    const container = document.getElementById('projects-carousel-container') || document.getElementById('projects');
+    if (!container) {
+      isCarouselInView = true;
+      startCarouselLoop();
+      return;
+    }
+
+    if ('IntersectionObserver' in window) {
+      if (carouselObserver) {
+        carouselObserver.disconnect();
+      }
+      carouselObserver = new IntersectionObserver(
+        (entries) => {
+          const entry = entries[0];
+          const inView = !!(entry && (entry.isIntersecting || entry.intersectionRatio > 0));
+          if (inView !== isCarouselInView) {
+            isCarouselInView = inView;
+            if (isCarouselInView) {
+              startCarouselLoop();
+            } else {
+              stopCarouselLoop();
+            }
+          }
+        },
+        {
+          root: null,
+          rootMargin: '150px 0px 150px 0px',
+          threshold: 0,
+        }
+      );
+      carouselObserver.observe(container);
+    } else {
+      isCarouselInView = true;
+      startCarouselLoop();
+    }
+  }
+
   function rotateToProjectIndex(targetIdx) {
     if (slotCount <= 1) return;
     const item = carouselItems.find((it) => it.projectIndex === targetIdx);
@@ -777,6 +846,9 @@
     const rawTheta = (item.baseAngle + targetAngle) % 360;
     const theta = ((rawTheta + 540) % 360) - 180;
     targetAngle -= theta;
+    if (isCarouselInView) {
+      startCarouselLoop();
+    }
   }
 
   function renderProjects(listOverride) {
@@ -860,67 +932,36 @@
       card.className = 'carousel-card';
       card.style.transform = `rotateY(${baseAngle}deg) translateZ(${radius}px)`;
 
-      const thumb = document.createElement('div');
-      thumb.className = 'project-thumb';
-
-      const img = document.createElement('img');
-      img.src =
+      const imgSrc =
         proj.image ||
         'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=900&q=80';
-      img.alt = proj.title || 'Project preview';
-      img.loading = 'lazy';
-      thumb.appendChild(img);
-
-      const badge = document.createElement('span');
-      badge.className = 'project-badge';
-      badge.textContent = proj.category || 'PROJECT';
-      thumb.appendChild(badge);
-
-      const num = document.createElement('span');
-      num.className = 'project-index';
-      num.textContent = `#${String(slot.projectIndex + 1).padStart(2, '0')}`;
-      thumb.appendChild(num);
-
-      const body = document.createElement('div');
-      body.className = 'project-body';
-
-      const title = document.createElement('h3');
-      title.className = 'project-title';
-      title.textContent = proj.title || 'Untitled Project';
-      body.appendChild(title);
-
-      const desc = document.createElement('p');
-      desc.className = 'project-desc';
-      desc.textContent = proj.description || '';
-      body.appendChild(desc);
-
-      const footer = document.createElement('div');
-      footer.className = 'project-footer';
+      const imgAlt = proj.title ? String(proj.title).replace(/"/g, '&quot;') : 'Project preview';
+      const categoryText = proj.category || 'PROJECT';
+      const indexNum = `#${String(slot.projectIndex + 1).padStart(2, '0')}`;
+      const titleText = proj.title || 'Untitled Project';
+      const descText = proj.description || '';
 
       const href = store.normalizeExternalUrl(proj.link);
-      if (href) {
-        const a = document.createElement('a');
-        a.className = 'project-link';
-        a.href = href;
-        if (/^https?:\/\//i.test(href)) {
-          a.target = '_blank';
-          a.rel = 'noopener noreferrer';
-        }
-        a.innerHTML = '<span>View Project</span><span aria-hidden="true">↗</span>';
-        footer.appendChild(a);
-      } else {
-        const span = document.createElement('span');
-        span.className = 'project-link--muted';
-        span.textContent = 'Case Study • Selected Work';
-        footer.appendChild(span);
-      }
+      const linkHtml = href
+        ? `<a class="project-link" href="${href}" ${/^https?:\/\//i.test(href) ? 'target="_blank" rel="noopener noreferrer"' : ''}><span>View Project</span><span aria-hidden="true">↗</span></a>`
+        : `<span class="project-link--muted">Case Study • Selected Work</span>`;
 
-      body.appendChild(footer);
-      card.appendChild(thumb);
-      card.appendChild(body);
+      card.innerHTML = `
+        <div class="project-thumb">
+          <img src="${imgSrc}" alt="${imgAlt}" loading="lazy">
+          <span class="project-badge">${categoryText}</span>
+          <span class="project-index">${indexNum}</span>
+        </div>
+        <div class="project-body">
+          <h3 class="project-title">${titleText}</h3>
+          <p class="project-desc">${descText}</p>
+          <div class="project-footer">
+            ${linkHtml}
+          </div>
+        </div>
+      `;
 
-      // Clicking a card rotates it directly to the front
-      card.addEventListener('click', (e) => {
+      card.addEventListener('click', () => {
         if (card.classList.contains('is-active')) return;
         rotateToProjectIndex(slot.projectIndex);
       });
@@ -930,6 +971,9 @@
         el: card,
         baseAngle,
         projectIndex: slot.projectIndex,
+        isActive: false,
+        isVisible: true,
+        lastOpacity: -1,
       });
     });
 
@@ -947,9 +991,15 @@
         });
         carouselDots.appendChild(dot);
       });
+      cachedDotEls = Array.from(carouselDots.querySelectorAll('.carousel-dot'));
+    } else {
+      cachedDotEls = [];
     }
+    lastClosestIndex = -1;
 
-    startCarouselLoop();
+    if (isCarouselInView) {
+      startCarouselLoop();
+    }
     updateLayoutCaches();
     onNativeScroll();
   }
@@ -958,12 +1008,14 @@
   if (carouselPrevBtn) {
     carouselPrevBtn.addEventListener('click', () => {
       targetAngle += slotAngleStep;
+      if (isCarouselInView) startCarouselLoop();
     });
   }
 
   if (carouselNextBtn) {
     carouselNextBtn.addEventListener('click', () => {
       targetAngle -= slotAngleStep;
+      if (isCarouselInView) startCarouselLoop();
     });
   }
 
@@ -1342,6 +1394,7 @@
   runPageIntro();
   applyProfile();
   renderProjects();
+  initCarouselVisibilityObserver();
   initTextRecreate();
   syncFromCloud();
 
