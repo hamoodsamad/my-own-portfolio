@@ -14,17 +14,20 @@
   const frames = new Array(FRAME_COUNT).fill(null);
   const loadingSet = new Set();
   const queue = [];
-  const CONCURRENCY = 4;
+  const CONCURRENCY = 6;
   let activeWorkers = 0;
-  let maxCachedFrames = 36; // dynamically tuned: 28 on mobile, 38 on tablet, 52 on desktop
+  let maxCachedFrames = 238; // dynamically tuned: 90 on mobile, 140 on tablet, 238 on desktop
   let cachedCount = 0;
 
   let width = 0;
   let height = 0;
   let canvasScale = 1;
-  let decodeTargetW = 3840;
-  let decodeTargetH = 2160;
+  let decodeTargetW = 2560;
+  let decodeTargetH = 1440;
   let cachedDrawRect = null;
+  let cachedTopGrad = null;
+  let cachedBtmGrad = null;
+  let needsRender = false;
   let maxScrollCache = 1;
   let cachedSectionOffsets = [];
 
@@ -114,30 +117,27 @@
     const { isMob, isTablet } = detectDevice();
 
     // Dynamically tune cache capacity based on device capabilities
-    maxCachedFrames = isMob ? 28 : (isTablet ? 38 : 52);
+    maxCachedFrames = isMob ? 90 : (isTablet ? 140 : 238);
 
-    let nextTargetW = 3840;
-    let nextTargetH = 2160;
+    let nextTargetW = 2560;
+    let nextTargetH = 1440;
 
     if (isMob) {
-      // Mobile: 1280x720 for compact screens, 1920x1080 for high-density Retina phones
+      // Mobile: 1280x720 for compact screens, 1600x900 for high-density Retina phones
       if (physicalW <= 720 || width <= 390) {
         nextTargetW = 1280;
         nextTargetH = 720;
       } else {
-        nextTargetW = 1920;
-        nextTargetH = 1080;
+        nextTargetW = 1600;
+        nextTargetH = 900;
       }
     } else if (isTablet) {
-      // Tablet: 1920x1080 or 2560x1440
-      nextTargetW = physicalW >= 1500 ? 2560 : 1920;
-      nextTargetH = physicalW >= 1500 ? 1440 : 1080;
+      // Tablet: 1920x1080
+      nextTargetW = 1920;
+      nextTargetH = 1080;
     } else {
-      // Desktop: Full 4K (3840x2160) for 4K / QHD monitors, 2560x1440 for standard laptops
+      // Desktop: 2560x1440 for 4K / QHD monitors, 1920x1080 for standard laptops
       if (physicalW >= 2560 || width >= 1920) {
-        nextTargetW = 3840;
-        nextTargetH = 2160;
-      } else if (physicalW >= 1440 || width >= 1200) {
         nextTargetW = 2560;
         nextTargetH = 1440;
       } else {
@@ -176,6 +176,21 @@
 
     // Cache precomputed draw rectangle (avoids repeating layout math on every render)
     cachedDrawRect = computeDrawRect(decodeTargetW, decodeTargetH);
+
+    // Cache portrait fade linear gradients once during resize (avoids allocating new gradients on every frame)
+    if (cachedDrawRect.isPortrait && cachedDrawRect.fadeH > 2) {
+      const { offsetY, drawH, fadeH } = cachedDrawRect;
+      cachedTopGrad = ctx.createLinearGradient(0, offsetY, 0, offsetY + fadeH);
+      cachedTopGrad.addColorStop(0, '#050308');
+      cachedTopGrad.addColorStop(1, 'rgba(5, 3, 8, 0)');
+
+      cachedBtmGrad = ctx.createLinearGradient(0, offsetY + drawH - fadeH, 0, offsetY + drawH);
+      cachedBtmGrad.addColorStop(0, 'rgba(5, 3, 8, 0)');
+      cachedBtmGrad.addColorStop(1, '#050308');
+    } else {
+      cachedTopGrad = null;
+      cachedBtmGrad = null;
+    }
 
     lastRenderedPos = -1;
     renderFrame(currentFrame, true);
@@ -218,18 +233,12 @@
     // Draw crisp single master frame — zero ghosting, zero double-edge blur
     ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
 
-    // On portrait mobile screens, softly feather top and bottom edges into the deep #050308 background
-    if (isPortrait && fadeH > 2) {
-      const topGrad = ctx.createLinearGradient(0, offsetY, 0, offsetY + fadeH);
-      topGrad.addColorStop(0, '#050308');
-      topGrad.addColorStop(1, 'rgba(5, 3, 8, 0)');
-      ctx.fillStyle = topGrad;
+    // On portrait mobile screens, softly feather top and bottom edges using pre-cached gradients (0 allocation)
+    if (isPortrait && cachedTopGrad && cachedBtmGrad && fadeH > 2) {
+      ctx.fillStyle = cachedTopGrad;
       ctx.fillRect(offsetX, offsetY, drawW, fadeH);
 
-      const btmGrad = ctx.createLinearGradient(0, offsetY + drawH - fadeH, 0, offsetY + drawH);
-      btmGrad.addColorStop(0, 'rgba(5, 3, 8, 0)');
-      btmGrad.addColorStop(1, '#050308');
-      ctx.fillStyle = btmGrad;
+      ctx.fillStyle = cachedBtmGrad;
       ctx.fillRect(offsetX, offsetY + drawH - fadeH, drawW, fadeH);
     }
 
@@ -239,7 +248,7 @@
   function evictExcessFrames(centerIdx) {
     if (cachedCount <= maxCachedFrames) return;
 
-    const SAFE_RADIUS = 8;
+    const SAFE_RADIUS = 16;
     let furthestIdx = -1;
     let maxDist = -1;
 
@@ -299,8 +308,10 @@
 
           evictExcessFrames(Math.round(currentFrame));
 
+          // Mark dirty and schedule rAF render instead of drawing directly outside tick loop
           if (Math.abs(currentFrame - index) < 1.5 || lastRenderedPos === -1) {
-            renderFrame(currentFrame, true);
+            needsRender = true;
+            scheduleLoop();
           }
           return bm;
         })
@@ -319,8 +330,10 @@
           frames[index] = img;
           cachedCount++;
           evictExcessFrames(Math.round(currentFrame));
+          // Mark dirty and schedule rAF render instead of drawing directly outside tick loop
           if (Math.abs(currentFrame - index) < 1.5 || lastRenderedPos === -1) {
-            renderFrame(currentFrame, true);
+            needsRender = true;
+            scheduleLoop();
           }
         }
         resolve(success ? img : null);
@@ -425,6 +438,7 @@
     if (absDelta < 0.008) {
       currentFrame = targetFrame;
       renderFrame(currentFrame);
+      needsRender = false;
       rafId = null;
       lastTimestamp = 0;
       return;
@@ -436,6 +450,7 @@
 
     currentFrame += frameDelta * factor;
     renderFrame(currentFrame);
+    needsRender = false;
     rafId = requestAnimationFrame(tick);
   }
 
