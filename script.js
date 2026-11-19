@@ -166,12 +166,13 @@
       loadingSet.add(index);
 
       if (USE_BITMAP) {
+        const isNative4K = decodeTargetW >= 3840;
         const resizeOpts =
-          decodeTargetW < 3840 && typeof createImageBitmap === 'function'
+          !isNative4K && typeof createImageBitmap === 'function'
             ? {
                 resizeWidth: decodeTargetW,
                 resizeHeight: decodeTargetH,
-                resizeQuality: 'low',
+                resizeQuality: decodeTargetW >= 2560 ? 'medium' : 'low',
               }
             : undefined;
 
@@ -352,17 +353,36 @@
         const offsetY = Math.round((height - drawH) * 0.35);
         const fadeH = Math.min(32, Math.round(drawH * 0.16));
 
-        return { offsetX, offsetY, drawW, drawH, isPortrait: true, fadeH };
+        return { offsetX, offsetY, drawW, drawH, isPortrait: true, fadeH, fadeW: 0 };
       }
 
-      // Landscape (desktop, 4K monitors, laptops, and rotated landscape phones)
-      const coverScale = Math.max(width / imgW, height / imgH);
-      const drawW = imgW * coverScale;
-      const drawH = imgH * coverScale;
-      const offsetX = (width - drawW) * 0.5;
-      const offsetY = (height - drawH) * 0.5;
+      // Landscape (desktop, 4K monitors, laptops, ultra-wides, 32-inch displays):
+      const aspect = width / height;
+      const imgAspect = imgW / imgH; // 3840 / 2160 = 1.7777
 
-      return { offsetX, offsetY, drawW, drawH, isPortrait: false, fadeH: 0 };
+      let coverScale;
+      let offsetX, offsetY;
+      let fadeW = 0;
+
+      if (aspect > imgAspect) {
+        // Wide or Ultra-wide screens (wider than 16:9):
+        // Constrain the scale to prevent extreme zoom-in into the face!
+        // Anchoring from upper third so head and hair remain fully visible and face stays at natural distance.
+        coverScale = Math.min(width / imgW, (height / imgH) * 1.08);
+        const drawW = Math.round(imgW * coverScale);
+        const drawH = Math.round(imgH * coverScale);
+        offsetX = Math.round((width - drawW) * 0.5);
+        offsetY = Math.round((height - drawH) * 0.22);
+        fadeW = width > drawW ? Math.min(90, Math.round((width - drawW) * 0.5)) : 0;
+        return { offsetX, offsetY, drawW, drawH, isPortrait: false, fadeH: 0, fadeW };
+      } else {
+        coverScale = Math.max(width / imgW, height / imgH);
+        const drawW = Math.round(imgW * coverScale);
+        const drawH = Math.round(imgH * coverScale);
+        offsetX = Math.round((width - drawW) * 0.5);
+        offsetY = Math.round((height - drawH) * 0.28);
+        return { offsetX, offsetY, drawW, drawH, isPortrait: false, fadeH: 0, fadeW: 0 };
+      }
     }
 
     function findNearestFrame(index) {
@@ -391,7 +411,7 @@
       if (!baseImg) return;
 
       const rect = cachedDrawRect || computeDrawRect(decodeTargetW, decodeTargetH);
-      const { offsetX, offsetY, drawW, drawH, isPortrait, fadeH } = rect;
+      const { offsetX, offsetY, drawW, drawH, isPortrait, fadeH, fadeW } = rect;
 
       ctx.globalAlpha = 1;
       ctx.fillStyle = '#050308';
@@ -407,6 +427,19 @@
 
         ctx.fillStyle = cachedBtmGrad;
         ctx.fillRect(offsetX, offsetY + drawH - fadeH, drawW, fadeH);
+      } else if (!isPortrait && fadeW > 2) {
+        // Soft edge feathering on wide displays where canvas extends past drawW
+        const leftGrad = ctx.createLinearGradient(offsetX, 0, offsetX + fadeW, 0);
+        leftGrad.addColorStop(0, '#050308');
+        leftGrad.addColorStop(1, 'rgba(5, 3, 8, 0)');
+        ctx.fillStyle = leftGrad;
+        ctx.fillRect(offsetX, 0, fadeW, height);
+
+        const rightGrad = ctx.createLinearGradient(offsetX + drawW - fadeW, 0, offsetX + drawW, 0);
+        rightGrad.addColorStop(0, 'rgba(5, 3, 8, 0)');
+        rightGrad.addColorStop(1, '#050308');
+        ctx.fillStyle = rightGrad;
+        ctx.fillRect(offsetX + drawW - fadeW, 0, fadeW, height);
       }
 
       lastRenderedPos = resolvedBase;
@@ -493,7 +526,11 @@
         nextTargetW = 1920;
         nextTargetH = 1080;
       } else {
-        if (physicalW >= 2560 || width >= 1920) {
+        // Desktop / Large 32-inch & 4K Displays:
+        if (physicalW >= 3200 || width >= 2560 || height >= 1400) {
+          nextTargetW = 3840;
+          nextTargetH = 2160;
+        } else if (physicalW >= 2000 || width >= 1800 || height >= 1000) {
           nextTargetW = 2560;
           nextTargetH = 1440;
         } else if (width <= 1440 && height <= 900) {
