@@ -315,6 +315,27 @@ export function initScrollEngine(canvasElement, trackedSections = []) {
     docResizeObserver.observe(document.documentElement);
   }
 
+  // Tab visibility management: pause rAF loop when tab is hidden, wake up cleanly when visible
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+        lastTimestamp = 0;
+      }
+    } else {
+      updateLayoutCaches(trackedSections);
+      pendingScrollY = window.scrollY || window.pageYOffset || 0;
+      targetFrame = scrollYToFrame(pendingScrollY);
+      currentFrame = targetFrame;
+      scrollScheduled = false;
+      lastTimestamp = 0;
+      ensureNeighborhood(Math.round(currentFrame), 0, 0, targetCanvasW, targetCanvasH, width);
+      renderFrame(currentFrame, cachedStartDrawRect, cachedEndDrawRect, lastScrollDirection, true);
+      scheduleLoop();
+    }
+  });
+
   return true;
 }
 

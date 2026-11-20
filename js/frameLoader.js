@@ -373,6 +373,9 @@ export function ensureNeighborhood(centerIdx, direction = 1, filteredScrollVeloc
  * Caches all 238 compressed blobs rapidly in RAM using parallel workers.
  */
 export function runBackgroundPreload(currentFramePos = 0, isUserScrolling = false) {
+  // Pause preloading when tab is hidden to eliminate background CPU/network waste
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+
   const navConn = typeof navigator !== 'undefined' && (navigator.connection || navigator.mozConnection || navigator.webkitConnection);
   const isSaveData = Boolean(navConn && (navConn.saveData || /2g|3g/.test(navConn.effectiveType || '')));
   if (isSaveData) return;
@@ -407,9 +410,19 @@ export function runBackgroundPreload(currentFramePos = 0, isUserScrolling = fals
 
 export function scheduleBackgroundPreload(delay = 200, currentFramePos = 0, isUserScrolling = false) {
   if (backgroundPreloadTimer) clearTimeout(backgroundPreloadTimer);
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
   backgroundPreloadTimer = setTimeout(() => {
     runBackgroundPreload(currentFramePos, isUserScrolling);
   }, delay);
+}
+
+// Automatically resume background preloading when tab becomes visible
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && cachedBlobCount < FRAME_COUNT) {
+      scheduleBackgroundPreload(100, 0, false);
+    }
+  });
 }
 
 export function preloadAnchorFrames(targetCanvasW, targetCanvasH, vpW) {
