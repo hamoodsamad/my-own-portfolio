@@ -132,31 +132,35 @@
 
     // Sliding window memory model configuration
     const WINDOW_RADIUS = 20;     // Immediate lookahead / lookbehind
-    const PRUNE_DISTANCE = 35;    // Evict frames further than 35 frames from active scroll focus
+    const PRUNE_DISTANCE = 40;    // Evict GPU textures further than 40 frames from active scroll focus
     const ANCHOR_STRIDE = 10;     // Retain 24 permanent anchor keyframes across sequence for instant jump fallback
     // Throttle prune to only fire when center moves ≥ this many frames — avoids 238-iter scan every rAF tick
-    const PRUNE_THROTTLE = 5;
+    const PRUNE_THROTTLE = 6;
 
     const frames = new Array(FRAME_COUNT).fill(null);
+    const blobCache = new Array(FRAME_COUNT).fill(null);
+    const blobFetchingSet = new Set();
     const loadingSet = new Set();
-    // urgentQueue is a min-heap ordered by distance from current focus (closest = index 0).
-    // We use a simple sorted-insertion approach: insertUrgent() keeps it ordered without
-    // re-sorting the entire array on every scroll event (O(n) insert vs O(n log n) sort).
+
+    // urgentQueue is ordered by priority: closest to active focus is processed first
     const urgentQueue = [];
     const idleQueue = [];
     const inUrgentSet = new Set();
     const inIdleSet = new Set();
-    // 4 concurrent fetches: enough to stay ahead of scroll without congesting the HTTP/2 pipeline
+    // 4 concurrent fetches: stays smoothly ahead of scroll without network saturation
     const CONCURRENCY = 4;
     let activeWorkers = 0;
     let cachedCount = 0;
-    // Track last prune center to avoid re-pruning on micro-movements
     let lastPrunedCenter = -1;
 
     let width = 0;
     let height = 0;
     let canvasScale = 1;
     let cachedDrawRect = null;
+    let cachedTopGrad = null;
+    let cachedBotGrad = null;
+    let cachedTopFadeH = 0;
+    let cachedBotFadeY = 0;
     let needsRender = false;
     let maxScrollCache = 1;
     let cachedSectionOffsets = [];
@@ -165,6 +169,7 @@
     let currentFrame = 0;
     let lastRenderedPos = -1;
     let lastNeighborhoodCenter = -1;
+    let lastNavScrollY = -999;
     let rafId = null;
     let lastTimestamp = 0;
     let pendingScrollY = 0;
@@ -173,6 +178,7 @@
     let scrollScheduled = false;
     let lastScrollDirection = 1; // 1 = scrolling down, -1 = scrolling up
 
+    let idlePreloadTimer = null;
     let resizeDebounceTimer = null;
 
     function frameSrc(index) {
@@ -181,6 +187,7 @@
 
     /**
      * Safely closes and releases an ImageBitmap texture from GPU memory.
+     * Retains the raw compressed WebP Blob in blobCache so scrolling back decodes in 1ms with ZERO network requests.
      */
     function releaseFrame(index) {
       if (index < 0 || index >= FRAME_COUNT) return;
@@ -198,10 +205,9 @@
 
     /**
      * Sliding Window Memory Model:
-     * Actively prunes non-anchor frames whose distance from active scroll focus
-     * exceeds PRUNE_DISTANCE, bounding GPU VRAM footprint to ~30-40 textures.
-     * Throttled: only fires when center has moved ≥ PRUNE_THROTTLE frames from last prune,
-     * eliminating the 238-iteration scan from running every single rAF tick.
+     * Actively prunes GPU textures of non-anchor frames whose distance from active scroll focus
+     * exceeds PRUNE_DISTANCE, bounding GPU VRAM footprint to lean textures.
+     * Throttled: only fires when center has moved ≥ PRUNE_THROTTLE frames.
      */
     function pruneDistantFrames(centerIdx) {
       if (Math.abs(centerIdx - lastPrunedCenter) < PRUNE_THROTTLE) return;
@@ -218,13 +224,15 @@
     }
 
     /**
-     * Purges all cached frames safely (e.g. on unmount or reset).
+     * Purges all cached frames and blobs safely (e.g. on asset tier change).
      */
     function clearAllFrames() {
       for (let i = 0; i < FRAME_COUNT; i++) {
         releaseFrame(i);
+        blobCache[i] = null;
       }
       loadingSet.clear();
+      blobFetchingSet.clear();
       urgentQueue.length = 0;
       idleQueue.length = 0;
       inUrgentSet.clear();
@@ -232,6 +240,31 @@
       cachedCount = 0;
       lastNeighborhoodCenter = -1;
       lastPrunedCenter = -1;
+      if (idlePreloadTimer) {
+        clearTimeout(idlePreloadTimer);
+        idlePreloadTimer = null;
+      }
+    }
+
+    function fetchBlob(index) {
+      if (index < 0 || index >= FRAME_COUNT) return Promise.resolve(null);
+      if (blobCache[index] !== null) return Promise.resolve(blobCache[index]);
+      if (blobFetchingSet.has(index)) return Promise.resolve(null);
+
+      blobFetchingSet.add(index);
+      return fetch(frameSrc(index))
+        .then((res) => (res.ok ? res.blob() : null))
+        .then((blob) => {
+          blobFetchingSet.delete(index);
+          if (blob) {
+            blobCache[index] = blob;
+          }
+          return blob;
+        })
+        .catch(() => {
+          blobFetchingSet.delete(index);
+          return null;
+        });
     }
 
     function decodeFrame(index) {
@@ -241,77 +274,61 @@
 
       loadingSet.add(index);
 
-      if (USE_BITMAP) {
-        return fetch(frameSrc(index))
-          .then((res) => (res.ok ? res.blob() : null))
-          .then((blob) => {
-            if (!blob) return null;
-            // Native zero-copy GPU texture creation directly from Blob — ZERO CPU software downscaling overhead!
+      const blobPromise = blobCache[index] !== null
+        ? Promise.resolve(blobCache[index])
+        : fetchBlob(index);
+
+      return blobPromise
+        .then((blob) => {
+          if (!blob) return null;
+          if (USE_BITMAP) {
             return createImageBitmap(blob);
-          })
-          .then((bm) => {
-            loadingSet.delete(index);
-            if (!bm) return null;
-
-            if (frames[index] !== null) {
-              if (typeof bm.close === 'function') {
-                try { bm.close(); } catch (_) {}
-              }
-              return frames[index];
-            }
-
-            // If the user rapidly scrolled far away during fetch, avoid keeping distant frame
-            const currentInt = Math.round(currentFrame);
-            const isAnchor = index === 0 || index === FRAME_COUNT - 1 || index % ANCHOR_STRIDE === 0;
-            if (!isAnchor && Math.abs(index - currentInt) > PRUNE_DISTANCE + 5) {
-              if (typeof bm.close === 'function') {
-                try { bm.close(); } catch (_) {}
-              }
-              return null;
-            }
-
-            frames[index] = bm;
-            cachedCount++;
-
-            // Trigger immediate render if this is the current frame OR the next likely frame (±1).
-            // This avoids a stale fallback being shown for 1 extra rAF tick when the adjacent frame arrives.
-            if (Math.abs(index - currentInt) <= 1 || lastRenderedPos === -1) {
-              needsRender = true;
-              scheduleLoop();
-            }
-            return bm;
-          })
-          .catch(() => {
-            loadingSet.delete(index);
-            return null;
+          }
+          return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => resolve(null);
+            img.src = URL.createObjectURL(blob);
           });
-      }
-
-      // Fallback for file: protocol or environments without createImageBitmap
-      return new Promise((resolve) => {
-        const img = new Image();
-        img.decoding = 'async';
-        const onDone = (success) => {
+        })
+        .then((bm) => {
           loadingSet.delete(index);
-          if (success) {
-            frames[index] = img;
-            cachedCount++;
-            const currentInt = Math.round(currentFrame);
-            if (Math.abs(index - currentInt) <= 1 || lastRenderedPos === -1) {
+          if (!bm) return null;
+
+          if (frames[index] !== null) {
+            if (typeof bm.close === 'function') {
+              try { bm.close(); } catch (_) {}
+            }
+            return frames[index];
+          }
+
+          // If scrolled far away during async operation, release GPU texture but keep Blob in blobCache!
+          const currentInt = Math.round(currentFrame);
+          const isAnchor = index === 0 || index === FRAME_COUNT - 1 || index % ANCHOR_STRIDE === 0;
+          if (!isAnchor && Math.abs(index - currentInt) > PRUNE_DISTANCE + 5) {
+            if (typeof bm.close === 'function') {
+              try { bm.close(); } catch (_) {}
+            }
+            return null;
+          }
+
+          frames[index] = bm;
+          cachedCount++;
+
+          // If current frame or adjacent just became ready:
+          if (Math.abs(index - currentInt) <= 1 || lastRenderedPos === -1) {
+            if (rafId === null) {
+              renderFrame(currentFrame, true);
+            } else {
               needsRender = true;
-              scheduleLoop();
             }
           }
-          resolve(success ? img : null);
-        };
-
-        img.onload = () => {
-          if (typeof img.decode === 'function') img.decode().then(() => onDone(true), () => onDone(true));
-          else onDone(true);
-        };
-        img.onerror = () => onDone(false);
-        img.src = frameSrc(index);
-      });
+          return bm;
+        })
+        .catch(() => {
+          loadingSet.delete(index);
+          return null;
+        });
     }
 
     function pumpQueue() {
@@ -322,7 +339,6 @@
           inUrgentSet.delete(idx);
         } else {
           idx = idleQueue.shift();
-          // Skip stale idle entries that were promoted to urgent (mark-skip pattern)
           if (!inIdleSet.has(idx)) continue;
           inIdleSet.delete(idx);
         }
@@ -342,16 +358,11 @@
       if (frames[index] !== null || loadingSet.has(index)) return;
 
       if (isUrgent) {
-        // O(1) promotion: drop from idle if present (mark-skip — O(1) with Set)
         if (inIdleSet.has(index)) {
           inIdleSet.delete(index);
-          // Don't splice (O(n)) — pumpQueue skips stale idle entries via inIdleSet check
         }
         if (!inUrgentSet.has(index)) {
           inUrgentSet.add(index);
-          // Sorted insertion by distance to centerIdx — O(n) worst case but runs rarely
-          // since most frames are inserted in already-near order. Avoids full O(n log n)
-          // sort on every ensureNeighborhood call during the rAF hot path.
           const dist = Math.abs(index - centerIdx);
           let lo = 0, hi = urgentQueue.length;
           while (lo < hi) {
@@ -370,52 +381,114 @@
     }
 
     function ensureNeighborhood(centerIdx, direction = 1) {
-      let addedAny = false;
-
-      const candidates = [centerIdx];
-      const primary1 = direction >= 0 ? centerIdx + 1 : centerIdx - 1;
-      const secondary1 = direction >= 0 ? centerIdx - 1 : centerIdx + 1;
-      if (primary1 >= 0 && primary1 < FRAME_COUNT) candidates.push(primary1);
-      if (secondary1 >= 0 && secondary1 < FRAME_COUNT) candidates.push(secondary1);
-
-      for (let offset = 2; offset <= WINDOW_RADIUS; offset++) {
-        const primary = direction >= 0 ? centerIdx + offset : centerIdx - offset;
-        const secondary = direction >= 0 ? centerIdx - offset : centerIdx + offset;
-        if (primary >= 0 && primary < FRAME_COUNT) candidates.push(primary);
-        if (secondary >= 0 && secondary < FRAME_COUNT && offset <= 6) candidates.push(secondary);
+      // 1. Purge stale requests from urgentQueue that are far from new centerIdx (> WINDOW_RADIUS + 5)
+      for (let i = urgentQueue.length - 1; i >= 0; i--) {
+        const item = urgentQueue[i];
+        if (Math.abs(item - centerIdx) > WINDOW_RADIUS + 5) {
+          urgentQueue.splice(i, 1);
+          inUrgentSet.delete(item);
+        }
       }
 
-      for (let i = 0; i < candidates.length; i++) {
-        const idx = candidates[i];
+      // 2. Prioritize immediate forward frames, then immediate backward frames
+      const immediateRange = [];
+      const primaryDir = direction >= 0 ? 1 : -1;
+
+      // Nearest ±2 frames have absolute highest priority
+      for (let off = 0; off <= 2; off++) {
+        const idx = centerIdx + off * primaryDir;
+        if (idx >= 0 && idx < FRAME_COUNT) immediateRange.push(idx);
+        const opp = centerIdx - off * primaryDir;
+        if (opp >= 0 && opp < FRAME_COUNT && opp !== idx) immediateRange.push(opp);
+      }
+
+      // Next lookahead frames in direction of scroll
+      for (let off = 3; off <= WINDOW_RADIUS; off++) {
+        const idx = centerIdx + off * primaryDir;
+        if (idx >= 0 && idx < FRAME_COUNT) immediateRange.push(idx);
+      }
+      // Behind frames (small buffer)
+      for (let off = 3; off <= 6; off++) {
+        const opp = centerIdx - off * primaryDir;
+        if (opp >= 0 && opp < FRAME_COUNT) immediateRange.push(opp);
+      }
+
+      let addedAny = false;
+      for (let i = 0; i < immediateRange.length; i++) {
+        const idx = immediateRange[i];
         if (frames[idx] === null && !loadingSet.has(idx) && !inUrgentSet.has(idx)) {
-          // Pass centerIdx so requestFrame can do sorted-insertion — no post-sort needed!
           requestFrame(idx, true, centerIdx);
           addedAny = true;
         }
       }
 
       if (addedAny) {
-        // Queue is already ordered by sorted-insertion — just pump without sorting!
         pumpQueue();
       }
     }
 
+    function runIdlePreload() {
+      // If user is actively scrolling or workers busy, delay preload until quiet
+      if (rafId !== null || activeWorkers >= CONCURRENCY) {
+        scheduleIdlePreload(350);
+        return;
+      }
+
+      // Find next uncached blob closest to current frame
+      let found = -1;
+      const cur = Math.round(currentFrame);
+      for (let dist = 1; dist < FRAME_COUNT; dist++) {
+        const forward = cur + dist;
+        if (forward < FRAME_COUNT && blobCache[forward] === null && !blobFetchingSet.has(forward)) {
+          found = forward;
+          break;
+        }
+        const backward = cur - dist;
+        if (backward >= 0 && blobCache[backward] === null && !blobFetchingSet.has(backward)) {
+          found = backward;
+          break;
+        }
+      }
+
+      if (found !== -1) {
+        fetchBlob(found).then(() => {
+          // If anchor frame, decode into GPU texture immediately
+          if (found % ANCHOR_STRIDE === 0 && frames[found] === null && blobCache[found]) {
+            createImageBitmap(blobCache[found]).then((bm) => {
+              if (bm && frames[found] === null) {
+                frames[found] = bm;
+                cachedCount++;
+              }
+            }).catch(() => {});
+          }
+          scheduleIdlePreload(35);
+        });
+      }
+    }
+
+    function scheduleIdlePreload(delay = 500) {
+      if (idlePreloadTimer) clearTimeout(idlePreloadTimer);
+      idlePreloadTimer = setTimeout(runIdlePreload, delay);
+    }
+
     function preloadAnchorFrames() {
-      // 1. Initial immediate window (frames 0 to 20) for instant initial response
-      const initialChunk = Math.min(20, FRAME_COUNT);
+      // 1. Initial immediate window (frames 0 to 15) for instant initial response
+      const initialChunk = Math.min(15, FRAME_COUNT);
       for (let i = 0; i < initialChunk; i++) {
         requestFrame(i, true);
       }
       pumpQueue();
 
-      // 2. Coarse keyframe grid across full sequence (every 16th frame + end)
+      // 2. Coarse keyframe grid across full sequence (every 10th frame + end)
       for (let i = ANCHOR_STRIDE; i < FRAME_COUNT; i += ANCHOR_STRIDE) {
         requestFrame(i, false);
       }
       requestFrame(FRAME_COUNT - 1, false);
       pumpQueue();
-    }
 
+      // Start gentle background preloading
+      scheduleIdlePreload(800);
+    }
     function updateLayoutCaches() {
       width = window.innerWidth;
       height = window.innerHeight;
@@ -525,25 +598,15 @@
         // Draw crisp frame with hardware sub-pixel positioning
         ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
 
-        // Top soft fade under navbar
-        const topFadeH = Math.min(100, Math.round(height * 0.12));
-        const topGrad = ctx.createLinearGradient(0, 0, 0, topFadeH);
-        topGrad.addColorStop(0, '#050308');
-        topGrad.addColorStop(0.5, 'rgba(5, 3, 8, 0.7)');
-        topGrad.addColorStop(1, 'rgba(5, 3, 8, 0)');
-        ctx.fillStyle = topGrad;
-        ctx.fillRect(0, 0, width, topFadeH);
+        // Pre-cached gradients (created once on resize, ZERO allocation in renderFrame!)
+        if (cachedTopGrad && cachedTopFadeH > 0) {
+          ctx.fillStyle = cachedTopGrad;
+          ctx.fillRect(0, 0, width, cachedTopFadeH);
+        }
 
-        // Bottom soft fade: torso dissolves seamlessly into pure #050308
-        const botFadeY = Math.max(0, offsetY + drawH - 180);
-        const botFadeH = height - botFadeY;
-        if (botFadeH > 0) {
-          const botGrad = ctx.createLinearGradient(0, botFadeY, 0, height);
-          botGrad.addColorStop(0, 'rgba(5, 3, 8, 0)');
-          botGrad.addColorStop(0.4, 'rgba(5, 3, 8, 0.65)');
-          botGrad.addColorStop(1, '#050308');
-          ctx.fillStyle = botGrad;
-          ctx.fillRect(0, botFadeY, width, botFadeH);
+        if (cachedBotGrad && cachedBotFadeY > 0) {
+          ctx.fillStyle = cachedBotGrad;
+          ctx.fillRect(0, cachedBotFadeY, width, height - cachedBotFadeY);
         }
       } else {
         // Landscape / Cover: edge-to-edge rasterization
@@ -552,7 +615,6 @@
 
       lastRenderedPos = resolvedBase;
     }
-
     function tick(timestamp) {
       // Cap dt at 1/30s (33ms) — tighter than 50ms to prevent a large
       // position jump after a tab-resume or dropped frame that would look like a pop.
@@ -569,24 +631,22 @@
         }
 
         // Track scroll velocity in frame-units/sec for adaptive lookahead
-        // scrollVelocity > 0 → scrolling down, < 0 → scrolling up
         const rawFrameDelta = scrollYToFrame(pendingScrollY) - scrollYToFrame(prevScrollY);
-        // Exponential moving average to smooth out micro-jitter in velocity
         scrollVelocity = scrollVelocity * 0.6 + (rawFrameDelta / Math.max(dt, 1 / 120)) * 0.4;
         prevScrollY = pendingScrollY;
 
         targetFrame = newTarget;
 
-        if (typeof NavigationController !== 'undefined') {
-          NavigationController.updateHeaderAndNav(pendingScrollY, height, cachedSectionOffsets);
+        if (Math.abs(pendingScrollY - lastNavScrollY) > 8) {
+          lastNavScrollY = pendingScrollY;
+          if (typeof NavigationController !== 'undefined') {
+            NavigationController.updateHeaderAndNav(pendingScrollY, height, cachedSectionOffsets);
+          }
         }
 
         const roundedTarget = Math.round(targetFrame);
         if (roundedTarget !== lastNeighborhoodCenter) {
           lastNeighborhoodCenter = roundedTarget;
-          // During fast scroll, bias the entire lookahead window forward in the direction of motion.
-          // velocityBias shifts the center of the window so we're preloading the frames
-          // the user will reach NEXT, not just the symmetric neighborhood.
           const absVel = Math.abs(scrollVelocity);
           const velocityBias = absVel > 3
             ? Math.min(Math.round(absVel * 0.18), 8) * lastScrollDirection
@@ -605,6 +665,7 @@
         needsRender = false;
         rafId = null;
         lastTimestamp = 0;
+        scheduleIdlePreload(250);
         return;
       }
 
@@ -620,7 +681,6 @@
       needsRender = false;
       rafId = requestAnimationFrame(tick);
     }
-
     function scheduleLoop() {
       if (rafId === null) {
         lastTimestamp = 0;
@@ -677,6 +737,19 @@
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
 
+      // Pre-compute and cache atmospheric gradients once on resize (zero overhead during 60fps render)
+      cachedTopFadeH = Math.min(100, Math.round(height * 0.12));
+      cachedTopGrad = ctx.createLinearGradient(0, 0, 0, cachedTopFadeH);
+      cachedTopGrad.addColorStop(0, '#050308');
+      cachedTopGrad.addColorStop(0.5, 'rgba(5, 3, 8, 0.7)');
+      cachedTopGrad.addColorStop(1, 'rgba(5, 3, 8, 0)');
+
+      cachedBotFadeY = Math.max(0, height - 180);
+      cachedBotGrad = ctx.createLinearGradient(0, cachedBotFadeY, 0, height);
+      cachedBotGrad.addColorStop(0, 'rgba(5, 3, 8, 0)');
+      cachedBotGrad.addColorStop(0.4, 'rgba(5, 3, 8, 0.65)');
+      cachedBotGrad.addColorStop(1, '#050308');
+
       cachedDrawRect = computeDrawRect();
 
       lastRenderedPos = -1;
@@ -694,11 +767,6 @@
         CarouselEngine.handleBreakpointResize(currentCardW);
       }
     }
-
-    /**
-     * Debounced resize handler:
-     * Prevents continuous frame purges and layout thrashing during active window resizing.
-     */
     function onDebouncedResize() {
       if (resizeDebounceTimer) {
         clearTimeout(resizeDebounceTimer);
