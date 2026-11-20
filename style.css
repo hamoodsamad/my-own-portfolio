@@ -808,6 +808,18 @@ button {
   background: linear-gradient(90deg, var(--accent), #ff8a5b);
 }
 
+.skill-bar span.fill-100 {
+  width: 100%;
+}
+
+.skill-bar span.fill-90 {
+  width: 90%;
+}
+
+.skill-bar span.fill-85 {
+  width: 85%;
+}
+
 /* =========================================
    Section 2: Behind the Designs / About
    ========================================= */
