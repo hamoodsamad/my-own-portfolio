@@ -1514,6 +1514,7 @@ button {
   transform-style: preserve-3d;
   contain: layout paint;
   will-change: transform, opacity;
+  opacity: var(--card-opacity, 1);
   transition: border-color 0.25s ease, box-shadow 0.25s ease;
   backface-visibility: hidden;
   cursor: pointer;

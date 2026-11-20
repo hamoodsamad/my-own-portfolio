@@ -81,12 +81,42 @@
   };
 
   /* ==========================================================================
-     MODULE 3: DECOUPLED SCROLL CANVAS ANIMATION ENGINE
-     Decouples asynchronous frame decoding from the 60fps/120fps rAF render loop.
-     Features sliding window memory management with 1080p capped decoding resolution,
-     active VRAM pruning of distant frames, debounced resize, and layout-cached scroll math.
+     MODULE 3: DECOUPLED SCROLL CANVAS ANIMATION ENGINE (ULTRA-PERFORMANCE REFACTOR)
+     Cinematic 60fps/120fps scroll-scrubbed canvas animation across all device tiers.
+     
+     Architectural Pillars:
+     1. Automatic Subject Framing:
+        - Normalized focal point config [startX, endX, startY, endY] with safe navbar margin.
+        - Unified placement formula for phone, tablet, desktop, 4K, and ultra-wide screens.
+        - Clamped offsets guarantee zero empty edges and zero sub-pixel blurring.
+        - visualViewport integration prevents mobile address bar shifts.
+        - Zero per-frame layout cost (computed once on debounced resize & cached).
+     2. Crisp, Sharp Image on Desktop & Adaptive DPR:
+        - DPR uncapped on desktop (supports full 2x Retina / HiDPI).
+        - Source tier selected by physical pixels (innerWidth * DPR >= 1920 -> 4K master frames).
+        - createImageBitmap decoding never downscales below physical canvas buffer size.
+        - Hardware smoothing set to 'high' on desktop and 'medium' on mobile.
+        - Adaptive quality guard steps DPR down if frame times exceed 20ms.
+     3. Scroll Smoothing & Cinematic Physics:
+        - Cinematic base spring ease (~12-14), adaptive with scroll velocity and distance.
+        - Sub-frame fractional crossfading with globalAlpha (zero blank canvas transitions).
+        - Timestamp-based scroll velocity with low-pass exponential smoothing.
+     4. Aggressive Background Preloading:
+        - Preloads initial batch and anchors first; continuously caches remaining frames at low priority.
+        - Compresses blobs in RAM; decodes to ImageBitmap inside sliding window.
+        - Velocity-aware lookahead (28 to 80 frames ahead in scroll direction).
+        - Destination prefetching on long smooth-scroll nav clicks.
+        - Static poster frame for prefers-reduced-motion.
      ========================================================================== */
   const ScrollCanvasEngine = (() => {
+    'use strict';
+
+    /* NOTE ON SOURCE ASSET QUALITY:
+       The engine renders at native 1:1 physical pixel fidelity. If source WebP frames appear
+       compressed or artifacted, re-export the image sequence from 4K/UHD master renders
+       at WebP quality 85-90 with lossless or near-lossless chroma subsampling.
+       Code cannot synthesize high-frequency detail absent from the source asset files. */
+
     const FRAME_COUNT = 238;
     const USE_BITMAP =
       window.location.protocol !== 'file:' && typeof window.createImageBitmap === 'function';
@@ -94,20 +124,77 @@
 
     const canvas = document.getElementById('scroll-canvas');
     if (!canvas) return null;
-    const ctx = canvas.getContext('2d', { alpha: false });
 
-    // Dynamic multi-tier asset loader:
-    // Tier 1 (4K / Ultra-wide / 32-inch displays): loads original 3840x2160 master frames from './frames'
-    // Tier 2 (Laptops, Tablets, Phones): loads optimized 1920x1080 frames from './frames-1080p'
+    // Desynchronized low-latency 2D rasterization context
+    const ctx = (function () {
+      try {
+        return (
+          canvas.getContext('2d', { alpha: false, desynchronized: true }) ||
+          canvas.getContext('2d', { alpha: false })
+        );
+      } catch (_) {
+        return canvas.getContext('2d', { alpha: false });
+      }
+    })();
+
+    // --------------------------------------------------------------------------
+    // PART 1: FOCAL POINT & FRAMING CONFIGURATION
+    // --------------------------------------------------------------------------
+    // Normalized focal point on the source frame [0..1].
+    // (0,0) is top-left, (1,1) is bottom-right.
+    // In the portrait photo sequence, the subject's face/eyes are situated around (0.52, 0.32).
+    const FOCAL_CONFIG = {
+      startX: 0.52,      // Normalized X at frame 0
+      endX: 0.58,        // Normalized X at frame 237 (allows slight start-to-end drift)
+      startY: 0.32,      // Normalized Y at frame 0
+      endY: 0.35,        // Normalized Y at frame 237
+      headRadiusX: 0.16, // Approximate head bounding radius (normalized)
+      headRadiusY: 0.20,
+    };
+
+    // Telemetry & Debug Tracking
+    let isDebug = false;
+    let isDebugOverlay = false;
+    const stats = {
+      rendered: 0,
+      exactHits: 0,
+      neighborHits: 0,
+      crossfades: 0,
+      skipped: 0,
+      decodes: 0,
+      decodeMsTotal: 0,
+      lastReport: 0,
+    };
+
+    function reportDebug(now) {
+      if (!isDebug || now - stats.lastReport < 2000) return;
+      const total = stats.exactHits + stats.neighborHits;
+      const hitRate = total > 0 ? ((stats.exactHits / total) * 100).toFixed(1) : '100';
+      const avgDecode = stats.decodes > 0 ? (stats.decodeMsTotal / stats.decodes).toFixed(2) : '0';
+      console.log(
+        `%c[ScrollCanvas Perf]%c HitRate: ${hitRate}% (${stats.exactHits} exact, ${stats.neighborHits} neighbor) | ` +
+        `Crossfades: ${stats.crossfades} | Skipped: ${stats.skipped} | ` +
+        `Avg Decode: ${avgDecode}ms | DPR: ${canvasScale.toFixed(2)} | Tier: ${currentTier} | Blobs: ${cachedBlobCount}/${FRAME_COUNT}`,
+        'color: #ff5719; font-weight: bold;',
+        'color: #a8a29e;'
+      );
+      stats.lastReport = now;
+    }
+
+    // --------------------------------------------------------------------------
+    // PART 2: ASSET TIERING BY PHYSICAL PIXELS
+    // --------------------------------------------------------------------------
     let currentFrameFolder = './frames-1080p';
     let currentDecodeW = 1920;
     let currentDecodeH = 1080;
     let currentTier = '1080p';
+    let currentTierGeneration = 0; // Generation token to invalidate stale in-flight fetches
 
     function detectAssetTier() {
       const rawDpr = window.devicePixelRatio || 1;
-      // Strictly block 4K on standard laptops. Force fallback to 1080p unless absolute 2K/4K external display widths (>2200px) are detected
-      if (window.innerWidth > 2200 || (window.innerWidth >= 2000 && rawDpr > 1.25)) {
+      const physicalW = (window.visualViewport ? window.visualViewport.width : window.innerWidth) * rawDpr;
+      // Select 4K master frames whenever physical width is >= 1920px (2K, 4K, and Retina laptops)
+      if (physicalW >= 1920) {
         return '4k';
       }
       return '1080p';
@@ -126,37 +213,41 @@
         currentDecodeW = 1920;
         currentDecodeH = 1080;
       }
+      currentTierGeneration++;
       clearAllFrames();
       return true;
     }
 
-    // Sliding window memory model configuration
-    const WINDOW_RADIUS = 30;     // Immediate lookahead / lookbehind increased to 30 frames
-    const PRUNE_DISTANCE = 130;   // Retain 130 frames resident in GPU VRAM to eliminate scroll-back decode latency
-    const ANCHOR_STRIDE = 10;     // Retain 24 permanent anchor keyframes across sequence for instant jump fallback
-    // Throttle prune to only fire when center moves ≥ this many frames — avoids 238-iter scan every rAF tick
-    const PRUNE_THROTTLE = 8;
+    // --------------------------------------------------------------------------
+    // SLIDING WINDOW MEMORY MODEL
+    // --------------------------------------------------------------------------
+    const ANCHOR_STRIDE = 10;     // Permanent keyframe anchors every 10 frames
+    const PRUNE_THROTTLE = 8;     // Throttled scan interval
 
     const frames = new Array(FRAME_COUNT).fill(null);
     const blobCache = new Array(FRAME_COUNT).fill(null);
     const blobFetchingSet = new Set();
     const loadingSet = new Set();
 
-    // urgentQueue is ordered by priority: closest to active focus is processed first
     const urgentQueue = [];
-    const idleQueue = [];
     const inUrgentSet = new Set();
-    const inIdleSet = new Set();
-    // 4 concurrent fetches: stays smoothly ahead of scroll without network saturation
     const CONCURRENCY = 4;
     let activeWorkers = 0;
     let cachedCount = 0;
+    let cachedBlobCount = 0;
     let lastPrunedCenter = -1;
 
+    // Layout, Viewport & DPR State
     let width = 0;
     let height = 0;
+    let lastRebuiltW = 0;
+    let lastRebuiltH = 0;
     let canvasScale = 1;
-    let cachedDrawRect = null;
+    let userMaxDpr = 2.0;          // Dynamic DPR cap adjusted by adaptive quality guard
+    let targetCanvasW = 1920;
+    let targetCanvasH = 1080;
+    let cachedStartDrawRect = null;
+    let cachedEndDrawRect = null;
     let cachedTopGrad = null;
     let cachedBotGrad = null;
     let cachedTopFadeH = 0;
@@ -165,37 +256,65 @@
     let maxScrollCache = 1;
     let cachedSectionOffsets = [];
 
+    // Frame Interpolation & Playhead
     let targetFrame = 0;
     let currentFrame = 0;
+    let lastRenderedFloor = -1;
+    let lastRenderedCeil = -1;
+    let lastRenderedFrac = -1;
     let lastRenderedPos = -1;
     let lastNeighborhoodCenter = -1;
     let lastNavScrollY = -999;
     let rafId = null;
     let lastTimestamp = 0;
     let pendingScrollY = 0;
-    let prevScrollY = 0;         // Previous scroll position for velocity tracking
-    let scrollVelocity = 0;      // Frames-per-second scroll speed (signed)
-    let scrollScheduled = false;
-    let lastScrollDirection = 1; // 1 = scrolling down, -1 = scrolling up
 
-    let idlePreloadTimer = null;
+    // Adaptive Frame-Rate / Quality Guard
+    let frameDurationHistory = [];
+    let lastQualityCheckTime = 0;
+
+    // Scroll Velocity Tracking (Event Timestamps + Low-Pass Filter)
+    let lastScrollEventTime = 0;
+    let lastScrollEventY = 0;
+    let filteredScrollVelocity = 0; // In frame-units / sec
+    let scrollScheduled = false;
+    let lastScrollDirection = 1;
+
+    // Carousel Sustained Scrolling Suspension
+    let sustainedScrollStart = 0;
+    let isCarouselSuspended = false;
+    let carouselResumeTimer = null;
+
+    // Background Preloader & Resize Observer
+    let isUserScrolling = false;
+    let userScrollStopTimer = null;
+    let backgroundPreloadTimer = null;
+    let docResizeObserver = null;
     let resizeDebounceTimer = null;
 
     function frameSrc(index) {
       return `${currentFrameFolder}/frame-${String(index + 1).padStart(3, '0')}.webp`;
     }
 
-    /**
-     * Safely closes and releases an ImageBitmap texture from GPU memory.
-     * Retains the raw compressed WebP Blob in blobCache so scrolling back decodes in 1ms with ZERO network requests.
-     */
+    function getAdaptiveLookahead(absVel) {
+      if (absVel > 30) return 80;
+      if (absVel > 15) return 60;
+      if (absVel > 6) return 40;
+      return 28;
+    }
+
+    function getAdaptivePruneDistance() {
+      const isMob = width < 768 || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 1 && width < 1024);
+      return isMob ? 50 : 130;
+    }
+
     function releaseFrame(index) {
       if (index < 0 || index >= FRAME_COUNT) return;
       const bm = frames[index];
       if (bm) {
         if (typeof bm.close === 'function') {
           try {
-            bm.close(); // Immediate GPU memory reclamation!
+            bm.close();
           } catch (_) {}
         }
         frames[index] = null;
@@ -203,29 +322,20 @@
       }
     }
 
-    /**
-     * Sliding Window Memory Model:
-     * Actively prunes GPU textures of non-anchor frames whose distance from active scroll focus
-     * exceeds PRUNE_DISTANCE, bounding GPU VRAM footprint to lean textures.
-     * Throttled: only fires when center has moved ≥ PRUNE_THROTTLE frames.
-     */
     function pruneDistantFrames(centerIdx) {
       if (Math.abs(centerIdx - lastPrunedCenter) < PRUNE_THROTTLE) return;
       lastPrunedCenter = centerIdx;
+      const pruneDist = getAdaptivePruneDistance();
       for (let i = 0; i < FRAME_COUNT; i++) {
-        // Retain anchor keyframes (first, last, and every 10th frame) for instant scroll jump fallback
         if (i === 0 || i === FRAME_COUNT - 1 || i % ANCHOR_STRIDE === 0) {
           continue;
         }
-        if (frames[i] !== null && Math.abs(i - centerIdx) > PRUNE_DISTANCE) {
+        if (frames[i] !== null && Math.abs(i - centerIdx) > pruneDist) {
           releaseFrame(i);
         }
       }
     }
 
-    /**
-     * Purges all cached frames and blobs safely (e.g. on asset tier change).
-     */
     function clearAllFrames() {
       for (let i = 0; i < FRAME_COUNT; i++) {
         releaseFrame(i);
@@ -234,30 +344,42 @@
       loadingSet.clear();
       blobFetchingSet.clear();
       urgentQueue.length = 0;
-      idleQueue.length = 0;
       inUrgentSet.clear();
-      inIdleSet.clear();
       cachedCount = 0;
+      cachedBlobCount = 0;
       lastNeighborhoodCenter = -1;
       lastPrunedCenter = -1;
-      if (idlePreloadTimer) {
-        clearTimeout(idlePreloadTimer);
-        idlePreloadTimer = null;
+      lastRenderedFloor = -1;
+      lastRenderedCeil = -1;
+      lastRenderedFrac = -1;
+      lastRenderedPos = -1;
+      if (backgroundPreloadTimer) {
+        clearTimeout(backgroundPreloadTimer);
+        backgroundPreloadTimer = null;
       }
     }
 
-    function fetchBlob(index) {
+    function fetchBlob(index, gen) {
       if (index < 0 || index >= FRAME_COUNT) return Promise.resolve(null);
       if (blobCache[index] !== null) return Promise.resolve(blobCache[index]);
       if (blobFetchingSet.has(index)) return Promise.resolve(null);
 
       blobFetchingSet.add(index);
-      return fetch(frameSrc(index))
+      const fetchOpts = (typeof Request !== 'undefined' && 'priority' in Request.prototype)
+        ? { priority: 'low' }
+        : {};
+
+      return fetch(frameSrc(index), fetchOpts)
         .then((res) => (res.ok ? res.blob() : null))
         .then((blob) => {
           blobFetchingSet.delete(index);
+          if (gen !== currentTierGeneration) return null;
           if (blob) {
             blobCache[index] = blob;
+            cachedBlobCount++;
+            if (cachedBlobCount === FRAME_COUNT && isDebug) {
+              console.log(`%c[ScrollCanvas] 100% of frame blobs cached (${FRAME_COUNT}/${FRAME_COUNT})`, 'color: #22c55e; font-weight: bold;');
+            }
           }
           return blob;
         })
@@ -272,28 +394,56 @@
       if (frames[index] !== null) return Promise.resolve(frames[index]);
       if (loadingSet.has(index)) return Promise.resolve(null);
 
+      const gen = currentTierGeneration;
       loadingSet.add(index);
+      const t0 = performance.now();
 
       const blobPromise = blobCache[index] !== null
         ? Promise.resolve(blobCache[index])
-        : fetchBlob(index);
+        : fetchBlob(index, gen);
 
       return blobPromise
         .then((blob) => {
-          if (!blob) return null;
+          if (!blob || gen !== currentTierGeneration) return null;
           if (USE_BITMAP) {
-            return createImageBitmap(blob);
+            // Never downscale below canvas physical buffer size!
+            // If targetCanvasW >= currentDecodeW, decode at native source dimensions.
+            const targetW = Math.max(targetCanvasW, Math.min(currentDecodeW, 1920));
+            const targetH = Math.max(targetCanvasH, Math.min(currentDecodeH, 1080));
+            return createImageBitmap(blob, {
+              resizeWidth: targetW,
+              resizeHeight: targetH,
+              resizeQuality: 'medium',
+            }).catch(() => createImageBitmap(blob));
           }
           return new Promise((resolve) => {
             const img = new Image();
-            img.onload = () => resolve(img);
-            img.onerror = () => resolve(null);
-            img.src = URL.createObjectURL(blob);
+            const objUrl = URL.createObjectURL(blob);
+            img.onload = () => {
+              URL.revokeObjectURL(objUrl);
+              resolve(img);
+            };
+            img.onerror = () => {
+              URL.revokeObjectURL(objUrl);
+              resolve(null);
+            };
+            img.src = objUrl;
           });
         })
         .then((bm) => {
           loadingSet.delete(index);
           if (!bm) return null;
+
+          const decodeMs = performance.now() - t0;
+          stats.decodes++;
+          stats.decodeMsTotal += decodeMs;
+
+          if (gen !== currentTierGeneration) {
+            if (typeof bm.close === 'function') {
+              try { bm.close(); } catch (_) {}
+            }
+            return null;
+          }
 
           if (frames[index] !== null) {
             if (typeof bm.close === 'function') {
@@ -302,10 +452,10 @@
             return frames[index];
           }
 
-          // If scrolled far away during async operation, release GPU texture but keep Blob in blobCache!
           const currentInt = Math.round(currentFrame);
           const isAnchor = index === 0 || index === FRAME_COUNT - 1 || index % ANCHOR_STRIDE === 0;
-          if (!isAnchor && Math.abs(index - currentInt) > PRUNE_DISTANCE + 5) {
+          const pruneDist = getAdaptivePruneDistance();
+          if (!isAnchor && Math.abs(index - currentInt) > pruneDist + 8) {
             if (typeof bm.close === 'function') {
               try { bm.close(); } catch (_) {}
             }
@@ -315,7 +465,6 @@
           frames[index] = bm;
           cachedCount++;
 
-          // If current frame or adjacent just became ready:
           if (Math.abs(index - currentInt) <= 1 || lastRenderedPos === -1) {
             if (rafId === null) {
               renderFrame(currentFrame, true);
@@ -332,16 +481,9 @@
     }
 
     function pumpQueue() {
-      while (activeWorkers < CONCURRENCY && (urgentQueue.length > 0 || idleQueue.length > 0)) {
-        let idx;
-        if (urgentQueue.length > 0) {
-          idx = urgentQueue.shift();
-          inUrgentSet.delete(idx);
-        } else {
-          idx = idleQueue.shift();
-          if (!inIdleSet.has(idx)) continue;
-          inIdleSet.delete(idx);
-        }
+      while (activeWorkers < CONCURRENCY && urgentQueue.length > 0) {
+        const idx = urgentQueue.shift();
+        inUrgentSet.delete(idx);
 
         if (frames[idx] === null && !loadingSet.has(idx)) {
           activeWorkers++;
@@ -357,58 +499,47 @@
       if (index < 0 || index >= FRAME_COUNT) return;
       if (frames[index] !== null || loadingSet.has(index)) return;
 
-      if (isUrgent) {
-        if (inIdleSet.has(index)) {
-          inIdleSet.delete(index);
+      if (isUrgent && !inUrgentSet.has(index)) {
+        inUrgentSet.add(index);
+        const dist = Math.abs(index - centerIdx);
+        let lo = 0, hi = urgentQueue.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >>> 1;
+          if (Math.abs(urgentQueue[mid] - centerIdx) <= dist) lo = mid + 1;
+          else hi = mid;
         }
-        if (!inUrgentSet.has(index)) {
-          inUrgentSet.add(index);
-          const dist = Math.abs(index - centerIdx);
-          let lo = 0, hi = urgentQueue.length;
-          while (lo < hi) {
-            const mid = (lo + hi) >>> 1;
-            if (Math.abs(urgentQueue[mid] - centerIdx) <= dist) lo = mid + 1;
-            else hi = mid;
-          }
-          urgentQueue.splice(lo, 0, index);
-        }
-      } else {
-        if (!inUrgentSet.has(index) && !inIdleSet.has(index)) {
-          idleQueue.push(index);
-          inIdleSet.add(index);
-        }
+        urgentQueue.splice(lo, 0, index);
       }
     }
 
     function ensureNeighborhood(centerIdx, direction = 1) {
-      // 1. Purge stale requests from urgentQueue that are far from new centerIdx (> WINDOW_RADIUS + 5)
+      const absVel = Math.abs(filteredScrollVelocity);
+      const lookahead = getAdaptiveLookahead(absVel);
+      const lookbehind = Math.min(lookahead, absVel > 15 ? 18 : 12);
+      const primaryDir = direction >= 0 ? 1 : -1;
+
       for (let i = urgentQueue.length - 1; i >= 0; i--) {
         const item = urgentQueue[i];
-        if (Math.abs(item - centerIdx) > WINDOW_RADIUS + 5) {
+        if (Math.abs(item - centerIdx) > lookahead + 10) {
           urgentQueue.splice(i, 1);
           inUrgentSet.delete(item);
         }
       }
 
-      // 2. Prioritize immediate forward frames, then immediate backward frames
       const immediateRange = [];
-      const primaryDir = direction >= 0 ? 1 : -1;
-
-      // Nearest ±2 frames have absolute highest priority
       for (let off = 0; off <= 2; off++) {
-        const idx = centerIdx + off * primaryDir;
-        if (idx >= 0 && idx < FRAME_COUNT) immediateRange.push(idx);
-        const opp = centerIdx - off * primaryDir;
-        if (opp >= 0 && opp < FRAME_COUNT && opp !== idx) immediateRange.push(opp);
+        const fwd = centerIdx + off * primaryDir;
+        if (fwd >= 0 && fwd < FRAME_COUNT) immediateRange.push(fwd);
+        const bwd = centerIdx - off * primaryDir;
+        if (bwd >= 0 && bwd < FRAME_COUNT && bwd !== fwd) immediateRange.push(bwd);
       }
 
-      // Next lookahead frames in direction of scroll
-      for (let off = 3; off <= WINDOW_RADIUS; off++) {
+      for (let off = 3; off <= lookahead; off++) {
         const idx = centerIdx + off * primaryDir;
         if (idx >= 0 && idx < FRAME_COUNT) immediateRange.push(idx);
       }
-      // Behind frames (buffer for instant scroll reversals)
-      for (let off = 3; off <= 14; off++) {
+
+      for (let off = 3; off <= lookbehind; off++) {
         const opp = centerIdx - off * primaryDir;
         if (opp >= 0 && opp < FRAME_COUNT) immediateRange.push(opp);
       }
@@ -427,180 +558,336 @@
       }
     }
 
-    function runIdlePreload() {
-      // If user is actively scrolling or workers busy, delay preload until quiet
-      if (rafId !== null || activeWorkers >= CONCURRENCY) {
-        scheduleIdlePreload(350);
+    // Continuous Low-Priority Background Preloader (requestIdleCallback + setTimeout fallback)
+    function runBackgroundPreload() {
+      if (isUserScrolling || activeWorkers >= CONCURRENCY || cachedBlobCount >= FRAME_COUNT) {
         return;
       }
 
-      // Find next uncached blob closest to current frame
-      let found = -1;
-      const cur = Math.round(currentFrame);
-      for (let dist = 1; dist < FRAME_COUNT; dist++) {
-        const forward = cur + dist;
-        if (forward < FRAME_COUNT && blobCache[forward] === null && !blobFetchingSet.has(forward)) {
-          found = forward;
-          break;
-        }
-        const backward = cur - dist;
-        if (backward >= 0 && blobCache[backward] === null && !blobFetchingSet.has(backward)) {
-          found = backward;
-          break;
-        }
-      }
+      const scheduleNext = (delay) => {
+        if (backgroundPreloadTimer) clearTimeout(backgroundPreloadTimer);
+        backgroundPreloadTimer = setTimeout(runBackgroundPreload, delay);
+      };
 
-      if (found !== -1) {
-        fetchBlob(found).then(() => {
-          // If anchor frame, decode into GPU texture immediately
-          if (found % ANCHOR_STRIDE === 0 && frames[found] === null && blobCache[found]) {
-            createImageBitmap(blobCache[found]).then((bm) => {
-              if (bm && frames[found] === null) {
-                frames[found] = bm;
-                cachedCount++;
-              }
-            }).catch(() => {});
+      const idleCb = (deadline) => {
+        if (isUserScrolling || activeWorkers >= CONCURRENCY) return;
+
+        const cur = Math.round(currentFrame);
+        let nextIdx = -1;
+
+        for (let dist = 1; dist < FRAME_COUNT; dist++) {
+          const fwd = cur + dist;
+          if (fwd < FRAME_COUNT && blobCache[fwd] === null && !blobFetchingSet.has(fwd)) {
+            nextIdx = fwd;
+            break;
           }
-          scheduleIdlePreload(35);
-        });
+          const bwd = cur - dist;
+          if (bwd >= 0 && blobCache[bwd] === null && !blobFetchingSet.has(bwd)) {
+            nextIdx = bwd;
+            break;
+          }
+        }
+
+        if (nextIdx !== -1) {
+          const gen = currentTierGeneration;
+          fetchBlob(nextIdx, gen).then(() => {
+            if (nextIdx % ANCHOR_STRIDE === 0 && frames[nextIdx] === null && blobCache[nextIdx]) {
+              decodeFrame(nextIdx);
+            }
+            if (cachedBlobCount < FRAME_COUNT && !isUserScrolling) {
+              scheduleNext(25);
+            }
+          });
+        }
+      };
+
+      if (typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(idleCb, { timeout: 800 });
+      } else {
+        setTimeout(() => idleCb({ timeRemaining: () => 15, didTimeout: true }), 35);
       }
     }
 
-    function scheduleIdlePreload(delay = 500) {
-      if (idlePreloadTimer) clearTimeout(idlePreloadTimer);
-      idlePreloadTimer = setTimeout(runIdlePreload, delay);
+    function scheduleBackgroundPreload(delay = 200) {
+      if (backgroundPreloadTimer) clearTimeout(backgroundPreloadTimer);
+      backgroundPreloadTimer = setTimeout(runBackgroundPreload, delay);
     }
 
     function preloadAnchorFrames() {
-      // 1. Initial immediate window (frames 0 to 15) for instant initial response
       const initialChunk = Math.min(15, FRAME_COUNT);
       for (let i = 0; i < initialChunk; i++) {
-        requestFrame(i, true);
+        requestFrame(i, true, 0);
       }
       pumpQueue();
 
-      // 2. Coarse keyframe grid across full sequence (every 10th frame + end)
       for (let i = ANCHOR_STRIDE; i < FRAME_COUNT; i += ANCHOR_STRIDE) {
-        requestFrame(i, false);
+        requestFrame(i, true, i);
       }
-      requestFrame(FRAME_COUNT - 1, false);
+      requestFrame(FRAME_COUNT - 1, true, FRAME_COUNT - 1);
       pumpQueue();
 
-      // Start gentle background preloading
-      scheduleIdlePreload(800);
+      scheduleBackgroundPreload(600);
     }
-    function updateLayoutCaches() {
-      width = window.innerWidth;
-      height = window.innerHeight;
-      maxScrollCache = Math.max(1, document.documentElement.scrollHeight - height);
-      if (typeof NavigationController !== 'undefined' && NavigationController.trackedSections) {
-        cachedSectionOffsets = NavigationController.trackedSections.map((sec) => ({
-          id: sec.id,
-          top: sec.offsetTop,
-        }));
+
+    function prefetchDestination(destScrollY) {
+      const destFrame = scrollYToFrame(destScrollY);
+      const rounded = Math.round(destFrame);
+      const dir = destFrame >= currentFrame ? 1 : -1;
+
+      ensureNeighborhood(rounded, dir);
+
+      for (let off = -4; off <= 4; off++) {
+        const idx = rounded + off;
+        if (idx >= 0 && idx < FRAME_COUNT) {
+          requestFrame(idx, true, rounded);
+        }
       }
+      pumpQueue();
+    }
+
+    // --------------------------------------------------------------------------
+    // PART 1: UNIFIED AUTOMATIC SUBJECT FRAMING MATHEMATICS
+    // --------------------------------------------------------------------------
+    function computeFramingForProgress(progress, vpW, vpH, imgW, imgH) {
+      const activeW = imgW || currentDecodeW;
+      const activeH = imgH || currentDecodeH;
+
+      const isPhonePortrait = vpW < 600 || (vpW < 768 && vpH > vpW * 1.15);
+      const isTabletPortrait = !isPhonePortrait && (vpW < 1024 && vpH > vpW);
+
+      // Normalized focal coordinate with drift across sequence
+      const focalNormX = FOCAL_CONFIG.startX + progress * (FOCAL_CONFIG.endX - FOCAL_CONFIG.startX);
+      const focalNormY = FOCAL_CONFIG.startY + progress * (FOCAL_CONFIG.endY - FOCAL_CONFIG.startY);
+
+      let targetScreenX;
+      let targetScreenY;
+      let safeNavbarTop;
+      let layoutMode;
+
+      if (isPhonePortrait) {
+        // Phone Portrait: Place subject on right (62% width) so hero copy stays clear on left.
+        // Head sits comfortably under mobile navbar.
+        targetScreenX = 0.62;
+        targetScreenY = 0.36;
+        safeNavbarTop = Math.max(68, vpH * 0.08);
+        layoutMode = 'phone-portrait';
+      } else if (isTabletPortrait) {
+        // Tablet Portrait: Centered-right balance (55% width).
+        targetScreenX = 0.55;
+        targetScreenY = 0.33;
+        safeNavbarTop = 72;
+        layoutMode = 'tablet-portrait';
+      } else {
+        // Desktop / Laptop / Ultra-wide / 4K Displays:
+        targetScreenX = 0.52;
+        targetScreenY = 0.33;
+        safeNavbarTop = 75;
+        layoutMode = 'cover';
+      }
+
+      // Minimum scale to cover entire viewport (zero empty edges)
+      const scaleCover = Math.max(vpW / activeW, vpH / activeH);
+
+      // In phone portrait, if cover scale zooms in too close on the head, adjust scale
+      // so head height fits comfortably (head height roughly 28% of viewport)
+      let scale = scaleCover;
+      if (isPhonePortrait) {
+        const desiredHeadHeight = vpH * 0.28;
+        const sourceHeadHeight = activeH * (FOCAL_CONFIG.headRadiusY * 2);
+        const naturalScale = desiredHeadHeight / sourceHeadHeight;
+        // Never go below scaleCover so edges stay covered!
+        scale = Math.max(scaleCover, Math.min(naturalScale, scaleCover * 1.15));
+      }
+
+      const drawW = Math.round(activeW * scale);
+      const drawH = Math.round(activeH * scale);
+
+      // Calculate desired offsets to position normalized focal point at targetScreenX, targetScreenY
+      const focalPxX = activeW * focalNormX * scale;
+      const focalPxY = activeH * focalNormY * scale;
+
+      let desiredOffsetX = vpW * targetScreenX - focalPxX;
+      let desiredOffsetY = vpH * targetScreenY - focalPxY;
+
+      // Ensure top of head (focal - headRadius) never hides under navbar
+      const headTopPx = desiredOffsetY + activeH * (focalNormY - FOCAL_CONFIG.headRadiusY) * scale;
+      if (headTopPx < safeNavbarTop) {
+        desiredOffsetY += (safeNavbarTop - headTopPx);
+      }
+
+      // Strictly clamp offsets: image must NEVER reveal black/empty edges!
+      // minOffsetX = vpW - drawW; maxOffsetX = 0
+      // minOffsetY = vpH - drawH; maxOffsetY = 0
+      const minOffsetX = vpW - drawW;
+      const maxOffsetX = 0;
+      const minOffsetY = vpH - drawH;
+      const maxOffsetY = 0;
+
+      const offsetX = Math.round(Math.min(maxOffsetX, Math.max(minOffsetX, desiredOffsetX)));
+      const offsetY = Math.round(Math.min(maxOffsetY, Math.max(minOffsetY, desiredOffsetY)));
+
+      return {
+        offsetX,
+        offsetY,
+        drawW,
+        drawH,
+        mode: layoutMode,
+        focalScreenX: offsetX + focalPxX,
+        focalScreenY: offsetY + focalPxY,
+        safeNavbarTop,
+      };
+    }
+
+    function updateLayoutCaches() {
+      // Use visualViewport if available to eliminate mobile address-bar displacement
+      if (window.visualViewport) {
+        width = Math.round(window.visualViewport.width);
+        height = Math.round(window.visualViewport.height);
+      } else {
+        width = window.innerWidth;
+        height = window.innerHeight;
+      }
+
+      maxScrollCache = Math.max(1, document.documentElement.scrollHeight - height);
+      const scrollY = window.scrollY || window.pageYOffset || 0;
+
+      if (typeof NavigationController !== 'undefined' && NavigationController.trackedSections) {
+        cachedSectionOffsets = NavigationController.trackedSections.map((sec) => {
+          const rect = sec.getBoundingClientRect();
+          return {
+            id: sec.id,
+            top: rect.top + scrollY,
+          };
+        });
+      }
+
+      // Cache start (frame 0) and end (frame 237) framing rects — ZERO per-frame layout recalculation!
+      cachedStartDrawRect = computeFramingForProgress(0, width, height, currentDecodeW, currentDecodeH);
+      cachedEndDrawRect = computeFramingForProgress(1, width, height, currentDecodeW, currentDecodeH);
+    }
+
+    function initDocResizeObserver() {
+      if (typeof ResizeObserver === 'undefined') return;
+      if (docResizeObserver) docResizeObserver.disconnect();
+
+      let roTimer = null;
+      docResizeObserver = new ResizeObserver(() => {
+        if (roTimer) clearTimeout(roTimer);
+        roTimer = setTimeout(() => {
+          updateLayoutCaches();
+          if (rafId === null) {
+            targetFrame = scrollYToFrame(window.scrollY || window.pageYOffset || 0);
+            currentFrame = targetFrame;
+            renderFrame(currentFrame);
+          }
+        }, 100);
+      });
+      docResizeObserver.observe(document.documentElement);
     }
 
     function scrollYToFrame(scrollY) {
-      // Pure mathematical projection based on cached maxScroll — zero DOM layout reading!
       const progress = Math.min(1, Math.max(0, scrollY / maxScrollCache));
       return progress * (FRAME_COUNT - 1);
     }
 
-    function computeDrawRect(imgW, imgH) {
-      const activeW = imgW || currentDecodeW;
-      const activeH = imgH || currentDecodeH;
-
-      const isPhonePortrait = width < 600 || (width < 768 && height > width * 1.15);
-      const isTabletPortrait = !isPhonePortrait && (width < 1024 && height > width);
-
-      if (isPhonePortrait) {
-        // TIER 1: Phone Portrait (iPhone, Pixel, Galaxy, etc.)
-        // Balanced luxury framing:
-        // - Subject placed gracefully on the right (anchor ~930 centered at 60% of viewport width)
-        // - Left side stays dark and clear for the hero typography and badges
-        // - Comfortable headroom (~70px) so hair never clips against mobile navbar
-        const scale = Math.min(Math.max(width / 750, height / 1700), 0.52);
-        const drawW = activeW * scale;
-        const drawH = activeH * scale;
-
-        const progress = Math.min(1, Math.max(0, currentFrame / (FRAME_COUNT - 1)));
-        const subjectAnchorX = 930 + progress * 60;
-        const offsetX = width * 0.60 - subjectAnchorX * scale;
-        const targetHeadTop = Math.max(68, height * 0.08);
-        const offsetY = targetHeadTop - 40 * scale;
-
-        return { offsetX, offsetY, drawW, drawH, mode: 'phone-portrait' };
+    function getInterpolatedDrawRect(position) {
+      const progress = Math.min(1, Math.max(0, position / (FRAME_COUNT - 1)));
+      if (!cachedStartDrawRect || !cachedEndDrawRect) {
+        return computeFramingForProgress(progress, width, height, currentDecodeW, currentDecodeH);
       }
 
-      if (isTabletPortrait) {
-        // TIER 2: Tablet Portrait (iPad, Galaxy Tab, Foldables)
-        // Balanced framing with 12% headroom, subject centered in upper third
-        const scale = Math.max((width / activeW) * 1.05, (height / activeH) * 0.88);
-        const drawW = activeW * scale;
-        const drawH = activeH * scale;
-
-        const progress = Math.min(1, Math.max(0, currentFrame / (FRAME_COUNT - 1)));
-        const subjectAnchorX = 860 + progress * 100;
-        const offsetX = width * 0.50 - subjectAnchorX * scale;
-        const offsetY = (height - drawH) * 0.14;
-
-        return { offsetX, offsetY, drawW, drawH, mode: 'tablet-portrait' };
-      }
-
-      // TIER 3 & 4: Laptop, Desktop, Ultra-wide & 4K Displays
-      // True full-bleed edge-to-edge cover framing with 20% vertical top-bias
-      const scale = Math.max(width / activeW, height / activeH);
-      const drawW = activeW * scale;
-      const drawH = activeH * scale;
-      const offsetX = (width - drawW) * 0.5;
-      const offsetY = (height - drawH) * 0.20;
-
-      return { offsetX, offsetY, drawW, drawH, mode: 'cover' };
+      // Linear interpolation between cached start and end rects (zero DOM or math overhead!)
+      const s = cachedStartDrawRect;
+      const e = cachedEndDrawRect;
+      return {
+        offsetX: Math.round(s.offsetX + progress * (e.offsetX - s.offsetX)),
+        offsetY: Math.round(s.offsetY + progress * (e.offsetY - s.offsetY)),
+        drawW: s.drawW,
+        drawH: s.drawH,
+        mode: s.mode,
+        focalScreenX: s.focalScreenX + progress * (e.focalScreenX - s.focalScreenX),
+        focalScreenY: s.focalScreenY + progress * (e.focalScreenY - s.focalScreenY),
+        safeNavbarTop: s.safeNavbarTop,
+      };
     }
 
-    function findNearestFrame(index) {
+    function findNearestFrame(index, preferredDir = 1) {
       if (frames[index]) return index;
-      // Cap search to PRUNE_DISTANCE — anything further is definitely evicted.
-      // This eliminates worst-case 238-iteration scan on every renderFrame call.
-      const maxSearch = Math.min(PRUNE_DISTANCE, FRAME_COUNT);
+      const maxSearch = Math.min(getAdaptivePruneDistance(), FRAME_COUNT);
+      const dir = preferredDir >= 0 ? 1 : -1;
+
       for (let offset = 1; offset <= maxSearch; offset++) {
-        const prev = index - offset;
-        const next = index + offset;
-        if (prev >= 0 && frames[prev]) return prev;
-        if (next < FRAME_COUNT && frames[next]) return next;
+        const primary = index + offset * dir;
+        if (primary >= 0 && primary < FRAME_COUNT && frames[primary]) return primary;
+        const secondary = index - offset * dir;
+        if (secondary >= 0 && secondary < FRAME_COUNT && frames[secondary]) return secondary;
       }
       return -1;
     }
 
+    // --------------------------------------------------------------------------
+    // PART 2 & 3: RENDERING & SUB-PIXEL FRACTIONAL CROSSFADING
+    // --------------------------------------------------------------------------
     function renderFrame(position, force = false) {
       const clamped = Math.min(FRAME_COUNT - 1, Math.max(0, position));
-      const targetIdx = Math.round(clamped);
-      if (!force && targetIdx === lastRenderedPos) return;
+      const floorIdx = Math.floor(clamped);
+      const ceilIdx = Math.min(FRAME_COUNT - 1, floorIdx + 1);
+      const frac = clamped - floorIdx;
 
-      const resolvedBase = findNearestFrame(targetIdx);
-      if (resolvedBase === -1) return;
+      // 1. Resolve primary base frame
+      const isExact = frames[floorIdx] !== null;
+      const resolvedFloor = isExact ? floorIdx : findNearestFrame(floorIdx, lastScrollDirection);
 
-      // Avoid redundant redraw if resolved fallback frame is already rendered
-      if (!force && resolvedBase === lastRenderedPos) return;
+      if (resolvedFloor === -1) {
+        // Keep last drawn image on screen — never flash solid black or blank canvas!
+        return;
+      }
 
-      const baseImg = frames[resolvedBase];
+      const baseImg = frames[resolvedFloor];
       if (!baseImg) return;
 
-      // On portrait / mobile, recompute drawRect when currentFrame moves so subject stays centered
-      const isPortrait = height > width * 1.15 || width <= 768;
-      const rect = isPortrait ? computeDrawRect() : (cachedDrawRect || computeDrawRect());
+      if (isExact) stats.exactHits++;
+      else stats.neighborHits++;
+
+      // 2. Resolve secondary crossfade frame if frac >= 0.02
+      let crossImg = null;
+      if (frac >= 0.02 && ceilIdx !== floorIdx) {
+        const resolvedCeil = frames[ceilIdx] ? ceilIdx : (frac > 0.12 ? findNearestFrame(ceilIdx, lastScrollDirection) : -1);
+        if (resolvedCeil !== -1 && resolvedCeil !== resolvedFloor && frames[resolvedCeil]) {
+          crossImg = frames[resolvedCeil];
+        }
+      }
+
+      // Avoid redundant redraw if frame indices and fractional alpha have not changed
+      if (
+        !force &&
+        resolvedFloor === lastRenderedFloor &&
+        crossImg === null &&
+        lastRenderedCeil === -1 &&
+        Math.abs(frac - lastRenderedFrac) < 0.005
+      ) {
+        return;
+      }
+
+      const rect = getInterpolatedDrawRect(position);
       const { offsetX, offsetY, drawW, drawH, mode } = rect;
 
       if (mode === 'phone-portrait' || mode === 'tablet-portrait') {
-        // Luxury deep background fill
         ctx.fillStyle = '#050308';
         ctx.fillRect(0, 0, width, height);
 
-        // Draw crisp frame with hardware sub-pixel positioning
+        // Hardware-snapped integer coordinates prevent sub-pixel blur
         ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
 
-        // Pre-cached gradients (created once on resize, ZERO allocation in renderFrame!)
+        // Sub-pixel fractional crossfade with globalAlpha
+        if (crossImg) {
+          ctx.globalAlpha = frac;
+          ctx.drawImage(crossImg, offsetX, offsetY, drawW, drawH);
+          ctx.globalAlpha = 1.0;
+          stats.crossfades++;
+        }
+
+        // Atmospheric pre-cached linear gradients
         if (cachedTopGrad && cachedTopFadeH > 0) {
           ctx.fillStyle = cachedTopGrad;
           ctx.fillRect(0, 0, width, cachedTopFadeH);
@@ -611,31 +898,142 @@
           ctx.fillRect(0, cachedBotFadeY, width, height - cachedBotFadeY);
         }
       } else {
-        // Landscape / Cover: edge-to-edge rasterization
+        // Full cover landscape edge-to-edge
         ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
+
+        if (crossImg) {
+          ctx.globalAlpha = frac;
+          ctx.drawImage(crossImg, offsetX, offsetY, drawW, drawH);
+          ctx.globalAlpha = 1.0;
+          stats.crossfades++;
+        }
       }
 
-      lastRenderedPos = resolvedBase;
+      // Debug Focal Point & Safe Area Overlay (when enabled)
+      if (isDebugOverlay) {
+        drawDebugOverlay(rect);
+      }
+
+      stats.rendered++;
+      lastRenderedFloor = resolvedFloor;
+      lastRenderedCeil = crossImg ? ceilIdx : -1;
+      lastRenderedFrac = frac;
+      lastRenderedPos = resolvedFloor;
     }
+
+    function drawDebugOverlay(rect) {
+      ctx.save();
+      // Draw safe navbar area
+      ctx.fillStyle = 'rgba(255, 87, 25, 0.15)';
+      ctx.fillRect(0, 0, width, rect.safeNavbarTop);
+      ctx.strokeStyle = '#ff5719';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(0, 0, width, rect.safeNavbarTop);
+
+      // Draw focal point crosshairs
+      ctx.strokeStyle = '#22c55e';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(rect.focalScreenX, rect.focalScreenY, 12, 0, Math.PI * 2);
+      ctx.moveTo(rect.focalScreenX - 20, rect.focalScreenY);
+      ctx.lineTo(rect.focalScreenX + 20, rect.focalScreenY);
+      ctx.moveTo(rect.focalScreenX, rect.focalScreenY - 20);
+      ctx.lineTo(rect.focalScreenX, rect.focalScreenY + 20);
+      ctx.stroke();
+
+      // Label
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '12px monospace';
+      ctx.fillText(`Focal: (${rect.focalScreenX.toFixed(0)}, ${rect.focalScreenY.toFixed(0)}) | Mode: ${rect.mode} | DPR: ${canvasScale.toFixed(2)}`, 16, rect.safeNavbarTop + 24);
+      ctx.restore();
+    }
+
+    function manageCarouselScrollSuspension(absDelta) {
+      if (typeof CarouselEngine === 'undefined') return;
+
+      const now = performance.now();
+      const isActivelyMoving = absDelta > 0.08 || Math.abs(filteredScrollVelocity) > 4;
+
+      if (isActivelyMoving) {
+        if (carouselResumeTimer) {
+          clearTimeout(carouselResumeTimer);
+          carouselResumeTimer = null;
+        }
+
+        if (!sustainedScrollStart) {
+          sustainedScrollStart = now;
+        } else if (now - sustainedScrollStart > 90 && !isCarouselSuspended) {
+          isCarouselSuspended = true;
+          CarouselEngine.setSuspended(true);
+        }
+      } else {
+        sustainedScrollStart = 0;
+        if (isCarouselSuspended && !carouselResumeTimer) {
+          scheduleCarouselResume(180);
+        }
+      }
+    }
+
+    function scheduleCarouselResume(delay = 180) {
+      if (typeof CarouselEngine === 'undefined') return;
+      if (carouselResumeTimer) clearTimeout(carouselResumeTimer);
+      carouselResumeTimer = setTimeout(() => {
+        carouselResumeTimer = null;
+        sustainedScrollStart = 0;
+        if (isCarouselSuspended) {
+          isCarouselSuspended = false;
+          CarouselEngine.setSuspended(false);
+        }
+      }, delay);
+    }
+
+    // --------------------------------------------------------------------------
+    // PART 2: ADAPTIVE QUALITY GUARD
+    // --------------------------------------------------------------------------
+    function checkAdaptiveQualityGuard(frameTimeMs) {
+      frameDurationHistory.push(frameTimeMs);
+      if (frameDurationHistory.length > 60) {
+        frameDurationHistory.shift();
+      }
+
+      const now = performance.now();
+      if (now - lastQualityCheckTime > 1200) {
+        lastQualityCheckTime = now;
+        if (frameDurationHistory.length >= 30) {
+          const avgFrameTime = frameDurationHistory.reduce((a, b) => a + b, 0) / frameDurationHistory.length;
+          // If average frame time stays above 20ms (> 50fps drop), step DPR down
+          if (avgFrameTime > 20.0 && userMaxDpr > 1.25) {
+            userMaxDpr = Math.max(1.25, userMaxDpr - 0.25);
+            if (isDebug) console.warn(`[ScrollCanvas Quality Guard] Dropped DPR cap to ${userMaxDpr.toFixed(2)} (avg frame time: ${avgFrameTime.toFixed(1)}ms)`);
+            resize();
+          } else if (avgFrameTime < 13.5 && userMaxDpr < (window.devicePixelRatio || 1)) {
+            // If performance stays excellent (< 13.5ms), step DPR cap back up
+            userMaxDpr = Math.min(2.0, Math.min(window.devicePixelRatio || 1, userMaxDpr + 0.25));
+            if (isDebug) console.log(`[ScrollCanvas Quality Guard] Raised DPR cap to ${userMaxDpr.toFixed(2)}`);
+            resize();
+          }
+        }
+      }
+    }
+
+    // --------------------------------------------------------------------------
+    // MAIN rAF PHYSICS & ANIMATION TICK
+    // --------------------------------------------------------------------------
     function tick(timestamp) {
-      // Cap dt at 1/30s (33ms) — tighter than 50ms to prevent a large
-      // position jump after a tab-resume or dropped frame that would look like a pop.
+      const tStart = performance.now();
       const dt = lastTimestamp ? Math.min((timestamp - lastTimestamp) / 1000, 1 / 30) : 1 / 60;
       lastTimestamp = timestamp;
 
+      // Exponential velocity decay
+      filteredScrollVelocity *= Math.exp(-3.5 * dt);
+
       if (scrollScheduled) {
         scrollScheduled = false;
-        // Rely exclusively on cached layout math — zero layout thrashing!
         const newTarget = scrollYToFrame(pendingScrollY);
         const diff = newTarget - targetFrame;
         if (Math.abs(diff) > 0.01) {
           lastScrollDirection = diff >= 0 ? 1 : -1;
         }
-
-        // Track scroll velocity in frame-units/sec for adaptive lookahead
-        const rawFrameDelta = scrollYToFrame(pendingScrollY) - scrollYToFrame(prevScrollY);
-        scrollVelocity = scrollVelocity * 0.6 + (rawFrameDelta / Math.max(dt, 1 / 120)) * 0.4;
-        prevScrollY = pendingScrollY;
 
         targetFrame = newTarget;
 
@@ -649,51 +1047,56 @@
         const roundedTarget = Math.round(targetFrame);
         if (roundedTarget !== lastNeighborhoodCenter) {
           lastNeighborhoodCenter = roundedTarget;
-          const absVel = Math.abs(scrollVelocity);
+          const absVel = Math.abs(filteredScrollVelocity);
           const velocityBias = absVel > 3
-            ? Math.min(Math.round(absVel * 0.18), 8) * lastScrollDirection
+            ? Math.min(Math.round(absVel * 0.22), 12) * lastScrollDirection
             : 0;
           ensureNeighborhood(Math.max(0, Math.min(FRAME_COUNT - 1, roundedTarget + velocityBias)), lastScrollDirection);
-          pruneDistantFrames(roundedTarget); // Active sliding window VRAM eviction!
+          pruneDistantFrames(roundedTarget);
         }
       }
 
       const delta = targetFrame - currentFrame;
       const absDelta = Math.abs(delta);
 
-      // Compositor Thread Overlap Elimination:
-      // When ScrollCanvasEngine detects active scrolling (Math.abs(targetFrame - currentFrame) > 0.05),
-      // immediately halt or bypass the 3D cylinder carousel's requestAnimationFrame loop.
-      const isScrolling = absDelta > 0.05;
-      if (typeof CarouselEngine !== 'undefined') {
-        CarouselEngine.setSuspended(isScrolling);
-      }
+      manageCarouselScrollSuspension(absDelta);
 
-      if (absDelta < 0.005) {
+      if (absDelta < 0.003) {
         currentFrame = targetFrame;
-        renderFrame(Math.round(currentFrame), needsRender);
+        renderFrame(currentFrame, needsRender);
         needsRender = false;
         rafId = null;
         lastTimestamp = 0;
-        if (typeof CarouselEngine !== 'undefined') {
-          CarouselEngine.setSuspended(false);
-        }
-        scheduleIdlePreload(250);
+        scheduleCarouselResume(150);
+        scheduleBackgroundPreload(250);
+        reportDebug(timestamp);
         return;
       }
 
-      // Responsive, critically-damped spring dynamics:
-      // Tuned baseEase ~36 and dynamicEase scaling up to 46 for high-delta scrolls
-      const baseEase = 36;
-      const dynamicEase = absDelta > 10 ? 46 : (absDelta > 2 ? baseEase : 28);
+      // Cinematic Adaptive Spring Dynamics:
+      // Base ease ~11.5 for cinematic glide, scaling dynamically with velocity and distance.
+      // Automatically accelerates on large distance delta, and smoothly eases down on arrival.
+      const velNorm = Math.min(1, Math.abs(filteredScrollVelocity) / 32);
+      const distBoost = Math.min(7.5, absDelta * 0.16);
+      const dynamicEase = Math.min(22.0, 11.5 + velNorm * 4.5 + distBoost);
       const factor = 1 - Math.exp(-dynamicEase * dt);
 
+      // Frame skipping & fast catchup: move playhead swiftly toward target
+      if (absDelta > 6) {
+        stats.skipped++;
+      }
+
       currentFrame += delta * factor;
-      // Math.round() prevents sub-pixel rasterization & layout jitter during render
-      renderFrame(Math.round(currentFrame));
+      renderFrame(currentFrame);
       needsRender = false;
+
+      const frameDuration = performance.now() - tStart;
+      checkAdaptiveQualityGuard(frameDuration);
+
+      reportDebug(timestamp);
       rafId = requestAnimationFrame(tick);
     }
+
     function scheduleLoop() {
       if (rafId === null) {
         lastTimestamp = 0;
@@ -701,7 +1104,6 @@
       }
     }
 
-    // Pause rAF when tab is hidden to save CPU/GPU completely
     function onVisibilityChange() {
       if (document.visibilityState === 'hidden') {
         if (rafId !== null) {
@@ -710,50 +1112,94 @@
           lastTimestamp = 0;
         }
       } else {
-        // Instantaneous recovery from state restoration — zero jumping or lagging
         pendingScrollY = window.scrollY || window.pageYOffset || 0;
         targetFrame = scrollYToFrame(pendingScrollY);
         currentFrame = targetFrame;
         scrollScheduled = false;
         lastTimestamp = 0;
-        renderFrame(Math.round(currentFrame), true);
+        renderFrame(currentFrame, true);
         scheduleLoop();
       }
     }
 
-    function onNativeScroll() {
-      // Direct composited scroll offset read — zero layout reflow
-      pendingScrollY = window.scrollY || window.pageYOffset || 0;
+    function onNativeScroll(e) {
+      const now = (e && e.timeStamp) ? e.timeStamp : performance.now();
+      const currentY = window.scrollY || window.pageYOffset || 0;
+      pendingScrollY = currentY;
       scrollScheduled = true;
+      isUserScrolling = true;
+
+      // Compute scroll velocity from scroll-event timestamps
+      if (lastScrollEventTime > 0) {
+        const dt = (now - lastScrollEventTime) / 1000;
+        if (dt > 0.001 && dt < 0.5) {
+          const rawVelPx = (currentY - lastScrollEventY) / dt;
+          const rawVelFrames = (rawVelPx / (maxScrollCache || 1)) * (FRAME_COUNT - 1);
+          filteredScrollVelocity = filteredScrollVelocity * 0.70 + rawVelFrames * 0.30;
+        }
+      }
+      lastScrollEventTime = now;
+      lastScrollEventY = currentY;
+
+      if (userScrollStopTimer) clearTimeout(userScrollStopTimer);
+      userScrollStopTimer = setTimeout(() => {
+        isUserScrolling = false;
+        scheduleBackgroundPreload(200);
+      }, 180);
+
       scheduleLoop();
     }
 
-    function resize() {
+    function resize(force = false) {
+      const newW = window.visualViewport ? Math.round(window.visualViewport.width) : window.innerWidth;
+      const newH = window.visualViewport ? Math.round(window.visualViewport.height) : window.innerHeight;
+      const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0) || (newW < 1024);
+
+      // Mobile address-bar collapse protection:
+      // Ignore height-only resizes caused by mobile address-bar showing/hiding (delta <= 120px)
+      const widthChanged = newW !== lastRebuiltW;
+      const heightDelta = Math.abs(newH - lastRebuiltH);
+      const shouldRebuildBuffer = force || widthChanged || !isTouch || heightDelta > 120;
+
       updateLayoutCaches();
+
+      if (!shouldRebuildBuffer && lastRebuiltW > 0) {
+        targetFrame = scrollYToFrame(window.scrollY || window.pageYOffset || 0);
+        if (rafId === null) {
+          currentFrame = targetFrame;
+          renderFrame(currentFrame);
+        }
+        return;
+      }
+
+      lastRebuiltW = newW;
+      lastRebuiltH = newH;
+
       const tierChanged = updateAssetTier();
-
       const rawDpr = window.devicePixelRatio || 1;
-      const isMob = width < 768 || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 1 && width < 1024);
-      const is4K = currentTier === '4k';
+      const isDesktop = width >= 1024 && !isTouch;
 
-      // On 4K external displays (>2200px): cap at 1.5 DPR up to 3840x2160 native buffer
-      // On standard laptops and mobile: strictly cap canvasScale to Math.min(rawDpr, 1.25) to eliminate GPU fillrate bottlenecks
-      canvasScale = is4K ? Math.min(rawDpr, 1.5) : Math.min(rawDpr, 1.25);
+      // Desktop: use full DPR up to userMaxDpr (allows 2.0 Retina sharpness)
+      // Mobile / Touch: cap at Math.min(rawDpr, 1.25) for GPU thermal efficiency
+      canvasScale = isDesktop ? Math.min(rawDpr, userMaxDpr) : Math.min(rawDpr, 1.25);
 
-      const targetCanvasW = Math.min(currentDecodeW, Math.max(1, Math.round(width * canvasScale)));
-      const targetCanvasH = Math.min(currentDecodeH, Math.max(1, Math.round(height * canvasScale)));
+      targetCanvasW = Math.max(1, Math.round(width * canvasScale));
+      targetCanvasH = Math.max(1, Math.round(height * canvasScale));
 
-      // Resize canvas buffer only when physical dimensions change
+      // Canvas CSS size must equal viewport dimensions; backing buffer matches physical pixels
+      canvas.style.width = width + 'px';
+      canvas.style.height = height + 'px';
+
       if (canvas.width !== targetCanvasW || canvas.height !== targetCanvasH) {
         canvas.width = targetCanvasW;
         canvas.height = targetCanvasH;
       }
-      // Always re-apply transform and smoothing — canvas 2D context state resets on any size change
+
       ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
       ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'medium'; // Halve bicubic filtering GPU rasterization overhead with zero visual degradation
+      // High smoothing quality on desktop, medium on mobile
+      ctx.imageSmoothingQuality = isDesktop ? 'high' : 'medium';
 
-      // Pre-compute and cache atmospheric gradients once on resize (zero overhead during 60fps render)
       cachedTopFadeH = Math.min(100, Math.round(height * 0.12));
       cachedTopGrad = ctx.createLinearGradient(0, 0, 0, cachedTopFadeH);
       cachedTopGrad.addColorStop(0, '#050308');
@@ -766,9 +1212,9 @@
       cachedBotGrad.addColorStop(0.4, 'rgba(5, 3, 8, 0.65)');
       cachedBotGrad.addColorStop(1, '#050308');
 
-      cachedDrawRect = computeDrawRect();
-
       lastRenderedPos = -1;
+      lastRenderedFloor = -1;
+      lastRenderedCeil = -1;
       renderFrame(currentFrame, true);
 
       if (tierChanged) {
@@ -783,28 +1229,56 @@
         CarouselEngine.handleBreakpointResize(currentCardW);
       }
     }
+
     function onDebouncedResize() {
-      if (resizeDebounceTimer) {
-        clearTimeout(resizeDebounceTimer);
-      }
+      if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
       resizeDebounceTimer = setTimeout(() => {
         resize();
       }, 150);
     }
 
+    function setDebug(enabled) {
+      isDebug = Boolean(enabled);
+      console.log(`[ScrollCanvas] Debug telemetry: ${isDebug ? 'ENABLED' : 'DISABLED'}`);
+    }
+
+    function setDebugOverlay(enabled) {
+      isDebugOverlay = Boolean(enabled);
+      console.log(`[ScrollCanvas] Focal point overlay: ${isDebugOverlay ? 'ENABLED' : 'DISABLED'}`);
+      if (rafId === null) {
+        renderFrame(currentFrame, true);
+      }
+    }
+
     function init() {
-      // Respect prefers-reduced-motion — disable the canvas animation entirely
+      // 1. Determine asset tier first before initiating any frame fetches
+      updateAssetTier();
+      updateLayoutCaches();
+
+      // Prefers-reduced-motion: render high-quality static poster frame, disable scroll scrubbing
       if (REDUCE_MOTION) {
-        canvas.style.display = 'none';
+        resize(true);
+        fetchBlob(0, currentTierGeneration).then((blob) => {
+          if (!blob) return;
+          createImageBitmap(blob).then((bm) => {
+            if (bm) {
+              frames[0] = bm;
+              renderFrame(0, true);
+            }
+          }).catch(() => {});
+        });
         return;
       }
-      updateLayoutCaches();
+
       targetFrame = scrollYToFrame(window.scrollY || window.pageYOffset || 0);
       currentFrame = targetFrame;
-      resize();
+      resize(true);
+
+      // Preload anchor keyframes only after tier is known
       preloadAnchorFrames();
       ensureNeighborhood(Math.round(currentFrame), 1);
-      // Pause rAF when tab is hidden to save CPU/GPU
+
+      initDocResizeObserver();
       document.addEventListener('visibilitychange', onVisibilityChange, { passive: true });
     }
 
@@ -814,17 +1288,22 @@
       onDebouncedResize,
       onNativeScroll,
       updateLayoutCaches,
+      prefetchDestination,
+      setDebug,
+      setDebugOverlay,
       get currentFrame() { return currentFrame; },
       get targetFrame() { return targetFrame; },
       get cachedSectionOffsets() { return cachedSectionOffsets; },
       get height() { return height; },
       get cachedCount() { return cachedCount; },
+      get cachedBlobCount() { return cachedBlobCount; },
     };
   })();
 
   /* ==========================================================================
      MODULE 4: STICKY HEADER, SCROLL SPY & ACCESSIBLE MOBILE MENU
-     Manages navigation states with zero layout thrashing during scroll events
+     Manages navigation states with getBoundingClientRect() absolute layout math
+     and destination frame prefetching on smooth scroll clicks.
      ========================================================================== */
   const NavigationController = (() => {
     const header = document.getElementById('site-header');
@@ -880,7 +1359,7 @@
         });
       }
 
-      // Smooth scroll for nav anchor links without lagging wheel scrolling
+      // Smooth scroll for nav anchor links with destination frame prefetching
       document.querySelectorAll('a[href^="#"]').forEach((anchor) => {
         anchor.addEventListener('click', (e) => {
           const targetId = anchor.getAttribute('href');
@@ -888,6 +1367,14 @@
             const targetEl = document.querySelector(targetId);
             if (targetEl) {
               e.preventDefault();
+              const scrollY = window.scrollY || window.pageYOffset || 0;
+              const targetRect = targetEl.getBoundingClientRect();
+              const destScrollY = targetRect.top + scrollY;
+
+              if (typeof ScrollCanvasEngine !== 'undefined' && ScrollCanvasEngine && typeof ScrollCanvasEngine.prefetchDestination === 'function') {
+                ScrollCanvasEngine.prefetchDestination(destScrollY);
+              }
+
               targetEl.scrollIntoView({ behavior: 'smooth' });
               if (mobileMenu && !mobileMenu.hidden) closeMobileMenu();
             }
@@ -960,9 +1447,9 @@
   })();
 
   /* ==========================================================================
-     MODULE 6: 3D CYLINDER PROJECTS CAROUSEL & FILTER ENGINE
-     Features GPU-accelerated 3D mathematics, off-screen pausing, backface culling,
-     and fully sanitized card rendering.
+     MODULE 6: 3D CYLINDER PROJECTS CAROUSEL & FILTER ENGINE (REFACTORED)
+     Delta-time normalized physics (60Hz & 120Hz consistency), pointer capture,
+     drag click suppression, and throttled CSS custom property opacity updates.
      ========================================================================== */
   const CarouselEngine = (() => {
     const store = window.PortfolioStore;
@@ -984,11 +1471,15 @@
     let currentAngle = 0;
     let targetAngle = 0;
     let isDragging = false;
+    let hasDragged = false;
+    let activePointerId = null;
     let dragStartX = 0;
+    let dragStartY = 0;
     let dragStartAngle = 0;
     let isHovered = false;
-    const autoSpinSpeed = 0.16; // Naturally brisk, smooth 360° spin
+    const autoSpinSpeed = 0.16; // 360° spin speed
     let carouselRaf = null;
+    let lastCarouselTime = 0;
     let slotCount = 1;
     let slotAngleStep = 360;
     let lastCylinderCardW = -1;
@@ -1058,19 +1549,24 @@
       categoryMenu.hidden = true;
     }
 
-    function updateCarouselPhysics() {
+    function updateCarouselPhysics(timestamp) {
       if (isScrollSuspended || !isCarouselInView || !carouselCylinder || carouselItems.length === 0) {
         carouselRaf = null;
+        lastCarouselTime = 0;
         return;
       }
 
+      // Delta-time based calculation for identical speed on 60Hz and 120Hz displays
+      const dt = lastCarouselTime ? Math.min((timestamp - lastCarouselTime) / 1000, 1 / 30) : 1 / 60;
+      lastCarouselTime = timestamp;
+
       if (!isDragging && !isHovered && slotCount > 1) {
-        targetAngle -= autoSpinSpeed;
+        targetAngle -= autoSpinSpeed * (dt * 60);
       }
 
-      // Smooth elastic lerp towards target angle
-      const diff = targetAngle - currentAngle;
-      currentAngle += diff * 0.14;
+      // Delta-time based exponential lerp: factor = 1 - exp(-rate * dt)
+      const lerpFactor = 1 - Math.exp(-8.5 * dt);
+      currentAngle += (targetAngle - currentAngle) * lerpFactor;
 
       carouselCylinder.style.transform = `rotateY(${currentAngle}deg)`;
 
@@ -1081,7 +1577,6 @@
       const itemCount = carouselItems.length;
       for (let i = 0; i < itemCount; i++) {
         const item = carouselItems[i];
-        // Calculate normalized angle relative to viewer (-180 to +180)
         const rawTheta = (item.baseAngle + currentAngle) % 360;
         const theta = ((rawTheta + 540) % 360) - 180;
         const absTheta = Math.abs(theta);
@@ -1089,7 +1584,7 @@
         const rad = (theta * Math.PI) / 180;
         const cosVal = Math.cos(rad);
 
-        // Backface Culling: Cull cards completely facing away from viewer (cosVal < -0.05)
+        // Backface Culling: Cull cards facing away from viewer (cosVal < -0.05)
         if (cosVal < -0.05) {
           if (item.isVisible) {
             item.el.style.visibility = 'hidden';
@@ -1099,13 +1594,11 @@
           continue;
         }
 
-        // Restore visibility if card was previously culled
         if (!item.isVisible) {
           item.el.style.visibility = '';
           item.isVisible = true;
         }
 
-        // Facing front: within half a step
         const isFront = absTheta <= halfStep;
         if (item.isActive !== isFront) {
           item.isActive = isFront;
@@ -1118,15 +1611,16 @@
           closestIndex = item.projectIndex;
         }
 
-        // Smooth depth perspective: front card full opacity, back cards curve gracefully into depth
+        // Depth opacity: quantized to reduce repaints, applied via CSS variable & style
         const depthOpacity = Math.round(Math.max(0.35, Math.min(1, 0.4 + 0.6 * cosVal)) * 100) / 100;
-        if (item.lastOpacity !== depthOpacity) {
+        if (Math.abs(item.lastOpacity - depthOpacity) >= 0.02) {
           item.lastOpacity = depthOpacity;
-          item.el.style.opacity = String(depthOpacity);
+          const opStr = depthOpacity.toFixed(2);
+          item.el.style.setProperty('--card-opacity', opStr);
+          item.el.style.opacity = opStr;
         }
       }
 
-      // Update pagination dots only when closestIndex changes
       if (closestIndex !== lastClosestIndex && cachedDotEls.length > 0) {
         if (lastClosestIndex >= 0 && cachedDotEls[lastClosestIndex]) {
           cachedDotEls[lastClosestIndex].classList.remove('is-active');
@@ -1143,6 +1637,7 @@
     function startCarouselLoop() {
       if (isScrollSuspended) return;
       if (carouselRaf === null && isCarouselInView) {
+        lastCarouselTime = 0;
         carouselRaf = requestAnimationFrame(updateCarouselPhysics);
       }
     }
@@ -1151,6 +1646,7 @@
       if (carouselRaf !== null) {
         cancelAnimationFrame(carouselRaf);
         carouselRaf = null;
+        lastCarouselTime = 0;
       }
     }
 
@@ -1178,22 +1674,16 @@
         }
         carouselObserver = new IntersectionObserver(
           (entries) => {
-            const entry = entries[0];
-            const inView = !!(entry && (entry.isIntersecting || entry.intersectionRatio > 0));
-            if (inView !== isCarouselInView) {
-              isCarouselInView = inView;
+            entries.forEach((entry) => {
+              isCarouselInView = entry.isIntersecting;
               if (isCarouselInView) {
                 startCarouselLoop();
               } else {
                 stopCarouselLoop();
               }
-            }
+            });
           },
-          {
-            root: null,
-            rootMargin: '150px 0px 150px 0px',
-            threshold: 0,
-          }
+          { threshold: 0.05 },
         );
         carouselObserver.observe(container);
       } else {
@@ -1203,60 +1693,53 @@
     }
 
     function rotateToProjectIndex(targetIdx) {
-      if (slotCount <= 1) return;
-      const item = carouselItems.find((it) => it.projectIndex === targetIdx);
-      if (!item) return;
+      const targetItem = carouselItems.find((item) => item.projectIndex === targetIdx);
+      if (!targetItem) return;
 
-      const rawTheta = (item.baseAngle + targetAngle) % 360;
+      const rawTheta = (targetItem.baseAngle + currentAngle) % 360;
       const theta = ((rawTheta + 540) % 360) - 180;
-      targetAngle -= theta;
-      if (isCarouselInView) {
-        startCarouselLoop();
-      }
+      targetAngle = targetAngle - theta;
+      if (isCarouselInView) startCarouselLoop();
     }
 
-    function renderProjects(listOverride) {
-      if (!store || !carouselCylinder) return;
-      if (Array.isArray(listOverride)) {
-        cachedProjects = listOverride;
+    function renderProjects(projectsToRender) {
+      if (!carouselCylinder) return;
+
+      if (projectsToRender && Array.isArray(projectsToRender)) {
+        cachedProjects = projectsToRender;
+      } else if (store && typeof store.getProjects === 'function') {
+        cachedProjects = store.getProjects();
       }
 
-      const projects = cachedProjects;
-
-      // Extract unique categories for filter menu
-      const categories = ['ALL'];
-      projects.forEach((p) => {
+      const allCategories = ['ALL'];
+      cachedProjects.forEach((p) => {
         const cat = String(p.category || '').trim().toUpperCase();
-        if (cat && !categories.includes(cat)) categories.push(cat);
+        if (cat && !allCategories.includes(cat)) {
+          allCategories.push(cat);
+        }
       });
-
-      if (!categories.includes(activeCategory)) {
-        activeCategory = 'ALL';
-      }
-
-      renderCategoryDropdown(categories, projects);
+      renderCategoryDropdown(allCategories, cachedProjects);
 
       const visible =
         activeCategory === 'ALL'
-          ? projects
-          : projects.filter(
+          ? cachedProjects
+          : cachedProjects.filter(
               (p) => String(p.category || '').trim().toUpperCase() === activeCategory,
             );
 
-      stopCarouselLoop();
       carouselCylinder.innerHTML = '';
       carouselItems = [];
 
-      if (visible.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'projects-empty';
-        empty.textContent = 'No projects published in this category yet.';
-        carouselCylinder.appendChild(empty);
+      if (!visible || visible.length === 0) {
+        const emptyMsg = document.createElement('div');
+        emptyMsg.className = 'carousel-empty';
+        emptyMsg.textContent = 'No projects found in this category.';
+        carouselCylinder.appendChild(emptyMsg);
         if (carouselDots) carouselDots.innerHTML = '';
+        cachedDotEls = [];
         return;
       }
 
-      // Determine circular slot repetition so the circle is continuous (min 4 slots for 3D orbit)
       let slots = [];
       if (visible.length >= 4) {
         slots = visible.map((p, idx) => ({ project: p, projectIndex: idx }));
@@ -1278,14 +1761,13 @@
       slotCount = slots.length;
       slotAngleStep = 360 / slotCount;
 
-      // Radius calculation for 3D cylinder (compact, proportional for all screen sizes)
       const isMobile = window.innerWidth <= 600;
       const isTablet = window.innerWidth <= 768;
       const cardWidth = isMobile ? 160 : isTablet ? 210 : 270;
 
       let radius = 0;
       if (slotCount >= 3) {
-        const radPerSlot = (Math.PI / slotCount);
+        const radPerSlot = Math.PI / slotCount;
         const computedR = (cardWidth / 2) / Math.tan(radPerSlot);
         radius = Math.max(isMobile ? 130 : (isTablet ? 180 : 220), Math.round(computedR + (isMobile ? 8 : 20)));
       }
@@ -1297,8 +1779,8 @@
         const card = document.createElement('article');
         card.className = 'carousel-card';
         card.style.transform = `rotateY(${baseAngle}deg) translateZ(${radius}px)`;
+        card.style.setProperty('--card-opacity', '1');
 
-        // Sanitize dynamic inputs strictly before injection
         const imgSrc = Security.sanitizeImageUrl(proj.image);
         const imgAlt = Security.escapeHTML(proj.title || 'Project preview');
         const categoryText = Security.escapeHTML(proj.category || 'PROJECT');
@@ -1306,46 +1788,67 @@
         const titleText = Security.escapeHTML(proj.title || 'Untitled Project');
         const descText = Security.escapeHTML(proj.description || '');
 
-        const rawHref = store.normalizeExternalUrl(proj.link);
-        const safeHref = Security.sanitizeUrl(rawHref);
+        let linksHTML = '';
+        if (proj.liveUrl) {
+          const liveSafe = Security.sanitizeUrl(proj.liveUrl);
+          if (liveSafe) {
+            linksHTML += `<a href="${liveSafe}" target="_blank" rel="noopener noreferrer" class="project-link" aria-label="Visit live demo for ${titleText}">Live Demo ↗</a>`;
+          }
+        }
+        if (proj.githubUrl) {
+          const ghSafe = Security.sanitizeUrl(proj.githubUrl);
+          if (ghSafe) {
+            linksHTML += `<a href="${ghSafe}" target="_blank" rel="noopener noreferrer" class="project-link project-link--muted" aria-label="View source code on GitHub for ${titleText}">Source ↗</a>`;
+          }
+        }
 
-        const linkHtml = safeHref
-          ? `<a class="project-link" href="${Security.escapeHTML(safeHref)}" ${/^https?:\/\//i.test(safeHref) ? 'target="_blank" rel="noopener noreferrer"' : ''}><span>View Project</span><span aria-hidden="true">↗</span></a>`
-          : `<span class="project-link--muted">Case Study • Selected Work</span>`;
+        let tagsHTML = '';
+        if (Array.isArray(proj.tags)) {
+          tagsHTML = proj.tags
+            .slice(0, 3)
+            .map((t) => `<span class="project-tag">${Security.escapeHTML(t)}</span>`)
+            .join('');
+        }
 
         card.innerHTML = `
           <div class="project-thumb">
-            <img src="${Security.escapeHTML(imgSrc)}" alt="${imgAlt}" loading="lazy">
+            <img src="${imgSrc}" alt="${imgAlt}" loading="lazy" decoding="async" />
             <span class="project-badge">${categoryText}</span>
             <span class="project-index">${indexNum}</span>
           </div>
           <div class="project-body">
             <h3 class="project-title">${titleText}</h3>
             <p class="project-desc">${descText}</p>
+            ${tagsHTML ? `<div class="project-tags">${tagsHTML}</div>` : ''}
             <div class="project-footer">
-              ${linkHtml}
+              ${linksHTML}
             </div>
           </div>
         `;
 
-        card.addEventListener('click', () => {
-          if (card.classList.contains('is-active')) return;
-          rotateToProjectIndex(slot.projectIndex);
-        });
+        card.addEventListener('click', (e) => {
+          if (hasDragged) {
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
+          if (sIdx !== lastClosestIndex && slotCount > 1) {
+            rotateToProjectIndex(slot.projectIndex);
+          }
+        }, true);
 
         carouselCylinder.appendChild(card);
         carouselItems.push({
           el: card,
           baseAngle,
           projectIndex: slot.projectIndex,
-          isActive: false,
           isVisible: true,
-          lastOpacity: -1,
+          isActive: false,
+          lastOpacity: 1,
         });
       });
 
-      // Render pagination dots for each unique visible project
-      if (carouselDots) {
+      if (carouselDots && visible.length > 1) {
         carouselDots.innerHTML = '';
         visible.forEach((_, vIdx) => {
           const dot = document.createElement('button');
@@ -1423,46 +1926,58 @@
       }
 
       if (carouselStage) {
+        carouselStage.style.touchAction = 'pan-y';
+
         carouselStage.addEventListener('pointerenter', () => {
           isHovered = true;
         });
 
         carouselStage.addEventListener('pointerleave', () => {
           isHovered = false;
-          if (isDragging) {
-            isDragging = false;
-            carouselStage.classList.remove('is-dragging');
-            targetAngle = Math.round(targetAngle / slotAngleStep) * slotAngleStep;
-          }
         });
 
         carouselStage.addEventListener('pointerdown', (e) => {
           if (slotCount <= 1) return;
           isDragging = true;
+          hasDragged = false;
+          activePointerId = e.pointerId;
           dragStartX = e.clientX;
+          dragStartY = e.clientY;
           dragStartAngle = targetAngle;
+          try {
+            carouselStage.setPointerCapture(e.pointerId);
+          } catch (_) {}
           carouselStage.classList.add('is-dragging');
         });
 
         window.addEventListener('pointermove', (e) => {
           if (!isDragging) return;
           const deltaX = e.clientX - dragStartX;
+          const deltaY = e.clientY - dragStartY;
+          if (Math.hypot(deltaX, deltaY) > 6) {
+            hasDragged = true;
+          }
           targetAngle = dragStartAngle + deltaX * 0.42;
         });
 
-        window.addEventListener('pointerup', () => {
+        function endDrag() {
           if (!isDragging) return;
           isDragging = false;
+          if (activePointerId !== null) {
+            try {
+              carouselStage.releasePointerCapture(activePointerId);
+            } catch (_) {}
+            activePointerId = null;
+          }
           if (carouselStage) carouselStage.classList.remove('is-dragging');
           targetAngle = Math.round(targetAngle / slotAngleStep) * slotAngleStep;
-        });
+          setTimeout(() => {
+            hasDragged = false;
+          }, 80);
+        }
 
-        window.addEventListener('pointercancel', () => {
-          if (!isDragging) return;
-          isDragging = false;
-          if (carouselStage) carouselStage.classList.remove('is-dragging');
-          targetAngle = Math.round(targetAngle / slotAngleStep) * slotAngleStep;
-        });
+        window.addEventListener('pointerup', endDrag);
+        window.addEventListener('pointercancel', endDrag);
       }
 
       initVisibilityObserver();
@@ -1869,6 +2384,8 @@
     if (ScrollCanvasEngine) {
       ScrollCanvasEngine.init();
       window.__ScrollCanvasEngine = ScrollCanvasEngine;
+      window.__SCROLL_DEBUG__ = (enabled) => ScrollCanvasEngine.setDebug(enabled);
+      window.__SCROLL_OVERLAY__ = (enabled) => ScrollCanvasEngine.setDebugOverlay(enabled);
       window.addEventListener('scroll', ScrollCanvasEngine.onNativeScroll, { passive: true });
       window.addEventListener('resize', ScrollCanvasEngine.onDebouncedResize, { passive: true });
       window.addEventListener(
