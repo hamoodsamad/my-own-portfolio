@@ -37,7 +37,7 @@ export const PERF_CONFIG = Object.freeze({
   maxDesktopDpr: 1.5,
   maxLaptopDpr: 1.25,
   maxMobileDpr: 1.25,
-  maxConcurrency: 6,
-  parallelBlobWorkers: 4,
+  maxConcurrency: 8,
+  parallelBlobWorkers: 8,
   smoothFilterQuality: 'medium', // Bilinear filtering for zero fill-rate stalls
 });

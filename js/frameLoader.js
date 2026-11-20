@@ -399,12 +399,20 @@ export function runBackgroundPreload(currentFramePos = 0, isUserScrolling = fals
   if (batch.length > 0) {
     const gen = currentTierGeneration;
     Promise.all(batch.map((idx) => fetchBlob(idx, gen))).then(() => {
+      // Decode anchor frames into memory as their blobs arrive
+      batch.forEach((idx) => {
+        if (idx % ANCHOR_STRIDE === 0 && frames[idx] === null && blobCache[idx]) {
+          requestFrame(idx, false, cur);
+        }
+      });
+      pumpQueue(1920, 1080, cur, 1440);
+
       if (cachedBlobCount < FRAME_COUNT) {
-        scheduleBackgroundPreload(isUserScrolling ? 100 : 25, currentFramePos, isUserScrolling);
+        scheduleBackgroundPreload(isUserScrolling ? 60 : 15, currentFramePos, isUserScrolling);
       }
     });
   } else if (cachedBlobCount < FRAME_COUNT) {
-    scheduleBackgroundPreload(200, currentFramePos, isUserScrolling);
+    scheduleBackgroundPreload(150, currentFramePos, isUserScrolling);
   }
 }
 

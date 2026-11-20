@@ -182,11 +182,11 @@ export function renderFrame(position, cachedStart, cachedEnd, scrollDir = 1, for
   else stats.neighborHits++;
 
   // 2. Resolve secondary crossfade frame for true, silky-smooth 60fps sub-frame blending
+  // Only blend with exact adjacent frame (ceilIdx) to eliminate ghosting and distant-frame pop-in
   let crossImg = null;
   if (frac >= 0.03 && ceilIdx !== floorIdx) {
-    const resolvedCeil = getFrame(ceilIdx) ? ceilIdx : (frac > 0.15 ? findNearestFrame(ceilIdx, scrollDir) : -1);
-    if (resolvedCeil !== -1 && resolvedCeil !== resolvedFloor) {
-      crossImg = getFrame(resolvedCeil);
+    if (getFrame(ceilIdx) !== null) {
+      crossImg = getFrame(ceilIdx);
     }
   }
 

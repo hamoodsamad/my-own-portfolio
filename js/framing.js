@@ -60,9 +60,11 @@ export function computeFramingForProgress(progress, vpW, vpH, imgW, imgH) {
     scale = Math.max(scale, minScaleW);
   } else {
     // Desktop / Laptop / Ultra-wide / 4K Displays:
-    targetScreenX = 0.52;
-    targetScreenY = 0.33;
-    safeNavbarTop = 75;
+    // Position subject naturally on right-center (58% width) so hero copy stays clean on left.
+    // Eye level sits comfortably below navbar without filling the screen.
+    targetScreenX = 0.58;
+    targetScreenY = 0.35;
+    safeNavbarTop = Math.min(80, Math.max(50, Math.round(vpH * 0.10)));
     layoutMode = 'cover';
     scale = Math.max(vpW / activeW, vpH / activeH);
   }

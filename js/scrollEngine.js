@@ -307,6 +307,11 @@ export function initScrollEngine(canvasElement, trackedSections = []) {
   updateLayoutCaches(trackedSections);
   resize(true, trackedSections);
 
+  // Unconditionally preload anchor frames and start high-throughput background preloading on startup
+  preloadAnchorFrames(targetCanvasW, targetCanvasH, width);
+  ensureNeighborhood(Math.round(currentFrame), 1, 0, targetCanvasW, targetCanvasH, width);
+  scheduleBackgroundPreload(50, 0, false);
+
   // Layout observer on documentElement
   if (typeof ResizeObserver === 'function') {
     docResizeObserver = new ResizeObserver(() => {
