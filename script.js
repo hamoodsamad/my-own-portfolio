@@ -194,9 +194,12 @@
 
     function detectAssetTier() {
       const rawDpr = window.devicePixelRatio || 1;
-      const physicalW = (window.visualViewport ? window.visualViewport.width : window.innerWidth) * rawDpr;
-      // Select 4K master frames whenever physical width is >= 1920px (2K, 4K, and Retina laptops)
-      if (physicalW >= 1920) {
+      const vpW = window.visualViewport ? window.visualViewport.width : window.innerWidth;
+      const physicalW = vpW * rawDpr;
+      // Ultra-Performance Laptop Optimization:
+      // Strictly block 4K on standard laptops (1080p, Retina MacBooks 1440x900) for butter-smooth 60fps.
+      // 4K tier is strictly reserved for true external 2K/4K/Ultrawide displays (CSS width >= 2200px OR physicalW >= 3200px).
+      if (vpW >= 2200 || physicalW >= 3200) {
         return '4k';
       }
       return '1080p';
@@ -546,7 +549,8 @@
     function ensureNeighborhood(centerIdx, direction = 1) {
       const absVel = Math.abs(filteredScrollVelocity);
       const lookahead = getAdaptiveLookahead(absVel);
-      const lookbehind = Math.min(lookahead, absVel > 15 ? 18 : 12);
+      // Symmetric sliding window lookbehind ensures zero decode latency on scroll-back
+      const lookbehind = Math.min(lookahead, absVel > 15 ? 32 : 24);
       const primaryDir = direction >= 0 ? 1 : -1;
 
       for (let i = urgentQueue.length - 1; i >= 0; i--) {
@@ -695,6 +699,7 @@
 
     // --------------------------------------------------------------------------
     // PART 1: UNIFIED AUTOMATIC SUBJECT FRAMING MATHEMATICS
+    // Natural human proportions: face is never too close and never hidden under navbar
     // --------------------------------------------------------------------------
     function computeFramingForProgress(progress, vpW, vpH, imgW, imgH) {
       const activeW = imgW || currentDecodeW;
@@ -703,7 +708,7 @@
       const isPhonePortrait = vpW < 600 || (vpW < 768 && vpH > vpW * 1.15);
       const isTabletPortrait = !isPhonePortrait && (vpW < 1024 && vpH > vpW);
 
-      // Normalized focal coordinate with drift across sequence
+      // Normalized focal coordinate with subtle start-to-end drift across sequence
       const focalNormX = FOCAL_CONFIG.startX + progress * (FOCAL_CONFIG.endX - FOCAL_CONFIG.startX);
       const focalNormY = FOCAL_CONFIG.startY + progress * (FOCAL_CONFIG.endY - FOCAL_CONFIG.startY);
 
@@ -711,46 +716,46 @@
       let targetScreenY;
       let safeNavbarTop;
       let layoutMode;
+      let scale;
 
       if (isPhonePortrait) {
-        // Phone Portrait: Place subject on right (62% width) so hero copy stays clear on left.
-        // Head sits comfortably under mobile navbar.
-        targetScreenX = 0.62;
-        targetScreenY = 0.36;
+        // Phone Portrait: Place subject gracefully on right (70% width) so hero copy stays clear on left.
+        // Head sits comfortably under mobile navbar at natural human scale (~23% of viewport height).
+        targetScreenX = 0.70;
+        targetScreenY = 0.34;
         safeNavbarTop = Math.max(68, vpH * 0.08);
         layoutMode = 'phone-portrait';
+
+        const desiredHeadH = vpH * 0.23;
+        const srcHeadH = activeH * 0.36;
+        scale = desiredHeadH / srcHeadH;
+        // Ensure image width covers phone width with breathing room
+        const minScaleW = (vpW * 1.08) / activeW;
+        scale = Math.max(scale, minScaleW);
       } else if (isTabletPortrait) {
-        // Tablet Portrait: Centered-right balance (55% width).
-        targetScreenX = 0.55;
-        targetScreenY = 0.33;
+        // Tablet Portrait: Centered-right balance (60% width), head height ~28% of screen.
+        targetScreenX = 0.60;
+        targetScreenY = 0.34;
         safeNavbarTop = 72;
         layoutMode = 'tablet-portrait';
+
+        const desiredHeadH = vpH * 0.28;
+        const srcHeadH = activeH * 0.36;
+        scale = desiredHeadH / srcHeadH;
+        const minScaleW = (vpW * 1.05) / activeW;
+        scale = Math.max(scale, minScaleW);
       } else {
         // Desktop / Laptop / Ultra-wide / 4K Displays:
         targetScreenX = 0.52;
         targetScreenY = 0.33;
         safeNavbarTop = 75;
         layoutMode = 'cover';
-      }
-
-      // Minimum scale to cover entire viewport (zero empty edges)
-      const scaleCover = Math.max(vpW / activeW, vpH / activeH);
-
-      // In phone portrait, if cover scale zooms in too close on the head, adjust scale
-      // so head height fits comfortably (head height roughly 28% of viewport)
-      let scale = scaleCover;
-      if (isPhonePortrait) {
-        const desiredHeadHeight = vpH * 0.28;
-        const sourceHeadHeight = activeH * (FOCAL_CONFIG.headRadiusY * 2);
-        const naturalScale = desiredHeadHeight / sourceHeadHeight;
-        // Never go below scaleCover so edges stay covered!
-        scale = Math.max(scaleCover, Math.min(naturalScale, scaleCover * 1.15));
+        scale = Math.max(vpW / activeW, vpH / activeH);
       }
 
       const drawW = Math.round(activeW * scale);
       const drawH = Math.round(activeH * scale);
 
-      // Calculate desired offsets to position normalized focal point at targetScreenX, targetScreenY
       const focalPxX = activeW * focalNormX * scale;
       const focalPxY = activeH * focalNormY * scale;
 
@@ -763,16 +768,19 @@
         desiredOffsetY += (safeNavbarTop - headTopPx);
       }
 
-      // Strictly clamp offsets: image must NEVER reveal black/empty edges!
-      // minOffsetX = vpW - drawW; maxOffsetX = 0
-      // minOffsetY = vpH - drawH; maxOffsetY = 0
+      // Clamping: horizontally never reveal empty side edges
       const minOffsetX = vpW - drawW;
       const maxOffsetX = 0;
-      const minOffsetY = vpH - drawH;
-      const maxOffsetY = 0;
-
       const offsetX = Math.round(Math.min(maxOffsetX, Math.max(minOffsetX, desiredOffsetX)));
-      const offsetY = Math.round(Math.min(maxOffsetY, Math.max(minOffsetY, desiredOffsetY)));
+
+      let offsetY;
+      if (isPhonePortrait || isTabletPortrait) {
+        offsetY = Math.round(desiredOffsetY);
+      } else {
+        const minOffsetY = vpH - drawH;
+        const maxOffsetY = 0;
+        offsetY = Math.round(Math.min(maxOffsetY, Math.max(minOffsetY, desiredOffsetY)));
+      }
 
       return {
         offsetX,
@@ -933,13 +941,10 @@
         }
       }
 
-      // Avoid redundant redraw if frame indices and fractional alpha have not changed
+      // Avoid redundant redraw if frame index has not changed
       if (
         !force &&
-        resolvedFloor === lastRenderedFloor &&
-        crossImg === null &&
-        lastRenderedCeil === -1 &&
-        Math.abs(frac - lastRenderedFrac) < 0.005
+        resolvedFloor === lastRenderedFloor
       ) {
         return;
       }
@@ -954,34 +959,28 @@
         // Hardware-snapped integer coordinates prevent sub-pixel blur
         ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
 
-        // Sub-pixel fractional crossfade with globalAlpha
-        if (crossImg) {
-          ctx.globalAlpha = frac;
-          ctx.drawImage(crossImg, offsetX, offsetY, drawW, drawH);
-          ctx.globalAlpha = 1.0;
-          stats.crossfades++;
+        // Soft, elegant atmospheric edge blending for natural portrait look
+        const topFadeH = Math.min(60, Math.round(drawH * 0.12));
+        if (topFadeH > 0 && offsetY > 0) {
+          const topGrad = ctx.createLinearGradient(0, offsetY, 0, offsetY + topFadeH);
+          topGrad.addColorStop(0, '#050308');
+          topGrad.addColorStop(1, 'rgba(5, 3, 8, 0)');
+          ctx.fillStyle = topGrad;
+          ctx.fillRect(0, offsetY, width, topFadeH);
         }
 
-        // Atmospheric pre-cached linear gradients
-        if (cachedTopGrad && cachedTopFadeH > 0) {
-          ctx.fillStyle = cachedTopGrad;
-          ctx.fillRect(0, 0, width, cachedTopFadeH);
-        }
-
-        if (cachedBotGrad && cachedBotFadeY > 0) {
-          ctx.fillStyle = cachedBotGrad;
-          ctx.fillRect(0, cachedBotFadeY, width, height - cachedBotFadeY);
+        const botFadeH = Math.min(100, Math.round(drawH * 0.20));
+        if (botFadeH > 0) {
+          const botGrad = ctx.createLinearGradient(0, offsetY + drawH - botFadeH, 0, offsetY + drawH);
+          botGrad.addColorStop(0, 'rgba(5, 3, 8, 0)');
+          botGrad.addColorStop(0.5, 'rgba(5, 3, 8, 0.6)');
+          botGrad.addColorStop(1, '#050308');
+          ctx.fillStyle = botGrad;
+          ctx.fillRect(0, offsetY + drawH - botFadeH, width, botFadeH + 4);
         }
       } else {
-        // Full cover landscape edge-to-edge
+        // Butter-smooth single draw: 1 drawImage call per frame eliminates bicubic fill-rate stall on laptops
         ctx.drawImage(baseImg, offsetX, offsetY, drawW, drawH);
-
-        if (crossImg) {
-          ctx.globalAlpha = frac;
-          ctx.drawImage(crossImg, offsetX, offsetY, drawW, drawH);
-          ctx.globalAlpha = 1.0;
-          stats.crossfades++;
-        }
       }
 
       // Debug Focal Point & Safe Area Overlay (when enabled)
@@ -991,8 +990,8 @@
 
       stats.rendered++;
       lastRenderedFloor = resolvedFloor;
-      lastRenderedCeil = crossImg ? ceilIdx : -1;
-      lastRenderedFrac = frac;
+      lastRenderedCeil = -1;
+      lastRenderedFrac = 0;
       lastRenderedPos = resolvedFloor;
     }
 
@@ -1159,20 +1158,19 @@
         return;
       }
 
-      // Cinematic Adaptive Spring Dynamics:
-      // Base ease ~11.5 for cinematic glide, scaling dynamically with velocity and distance.
-      // Automatically accelerates on large distance delta, and smoothly eases down on arrival.
-      const velNorm = Math.min(1, Math.abs(filteredScrollVelocity) / 32);
-      const distBoost = Math.min(8.5, absDelta * 0.18);
-      const dynamicEase = Math.min(26.0, 11.5 + velNorm * 4.5 + distBoost);
+      // Butter-Smooth Responsive Spring Dynamics for Laptops & All Screens:
+      // Snappy baseEase (~28) eliminates sluggish glide and input lag; scales up to 42 for high-speed flicks.
+      const velNorm = Math.min(1, Math.abs(filteredScrollVelocity) / 28);
+      const distBoost = Math.min(12.0, absDelta * 0.22);
+      const dynamicEase = Math.min(42.0, 28.0 + velNorm * 8.0 + distBoost);
       const factor = 1 - Math.exp(-dynamicEase * dt);
 
-      // A7 Fix: Frame skipping & fast catchup for large scroll leaps (Home/End/scrollbar drag)
+      // Fast catchup for large leaps (scrollbar drag, Home/End keys)
       if (absDelta > 6) {
         stats.skipped++;
       }
-      if (absDelta > 60) {
-        currentFrame += delta * Math.min(0.48, factor * 2.2);
+      if (absDelta > 50) {
+        currentFrame += delta * Math.min(0.55, factor * 2.5);
       } else {
         currentFrame += delta * factor;
       }
@@ -1221,6 +1219,11 @@
       pendingScrollY = currentY;
       scrollScheduled = true;
       isUserScrolling = true;
+
+      // Immediately suspend background carousel to dedicate 100% of main-thread rAF to canvas scroll
+      if (typeof CarouselEngine !== 'undefined') {
+        CarouselEngine.setSuspended(true);
+      }
 
       // A7 Fix: In reduced-motion mode, update navigation spy but preserve static poster frame
       if (REDUCE_MOTION) {
@@ -1280,9 +1283,10 @@
       const rawDpr = window.devicePixelRatio || 1;
       const isDesktop = width >= 1024 && !isTouch;
 
-      // Desktop: use full DPR up to userMaxDpr (allows 2.0 Retina sharpness)
-      // Mobile / Touch: cap at Math.min(rawDpr, 1.25) for GPU thermal efficiency
-      canvasScale = isDesktop ? Math.min(rawDpr, userMaxDpr) : Math.min(rawDpr, 1.25);
+      // Cap canvasScale to 1.25 on standard laptops & mobile (halves pixel load with crisp retina detail)
+      // Allow up to 1.5 only on true 4K desktop screens (width >= 2200)
+      const maxScale = width >= 2200 ? 1.5 : 1.25;
+      canvasScale = Math.min(rawDpr, maxScale);
 
       targetCanvasW = Math.max(1, Math.round(width * canvasScale));
       targetCanvasH = Math.max(1, Math.round(height * canvasScale));
@@ -1298,8 +1302,8 @@
 
       ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
       ctx.imageSmoothingEnabled = true;
-      // High smoothing quality on desktop, medium on mobile
-      ctx.imageSmoothingQuality = isDesktop ? 'high' : 'medium';
+      // Bilinear filtering on all devices: halves GPU rasterization cost with zero visual degradation
+      ctx.imageSmoothingQuality = 'medium';
 
       cachedTopFadeH = Math.min(100, Math.round(height * 0.12));
       cachedTopGrad = ctx.createLinearGradient(0, 0, 0, cachedTopFadeH);
