@@ -30,7 +30,8 @@
     sanitizeUrl(url) {
       if (!url) return '';
       const str = String(url).trim();
-      if (/^(https?:\/\/|mailto:|tel:|\/|\.\/|#)/i.test(str)) {
+      // B5 Fix: Disallow protocol-relative URLs (//) by requiring single leading slash not followed by /
+      if (/^(https?:\/\/|mailto:|tel:|\/(?!\/)|\.\/|#)/i.test(str)) {
         return str;
       }
       return '';
@@ -46,7 +47,8 @@
         return 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=900&q=80';
       }
       const str = String(url).trim();
-      if (/^(https?:\/\/|\/|\.\/|data:image\/(png|jpeg|jpg|webp|gif);base64,)/i.test(str)) {
+      // B5 Fix: Disallow protocol-relative URLs (//) in image sources
+      if (/^(https?:\/\/|\/(?!\/)|\.\/|data:image\/(png|jpeg|jpg|webp|gif);base64,)/i.test(str)) {
         return str;
       }
       return 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=900&q=80';
@@ -269,9 +271,14 @@
     let lastTimestamp = 0;
     let pendingScrollY = 0;
 
-    // Adaptive Frame-Rate / Quality Guard
+    // Adaptive Frame-Rate / Quality Guard & Safety State
     let frameDurationHistory = [];
     let lastQualityCheckTime = 0;
+    let lastDprChangeTime = 0;          // A3 Fix: Hysteresis cooldown timer (min 3000ms between DPR updates)
+    let pendingDprCap = null;           // A3 Fix: Deferred DPR adjustment applied when settled
+    let lastDrawnFallbackBitmap = null; // A2 Fix: Preserves last drawn frame across tier changes
+    let consecutiveDecodeErrors = 0;   // A6 Fix: Mobile OOM & decode failure safety counter
+    let mobileMemoryEmergency = false;  // A6 Fix: Emergency reduced-radius memory mode
 
     // Scroll Velocity Tracking (Event Timestamps + Low-Pass Filter)
     let lastScrollEventTime = 0;
@@ -304,6 +311,8 @@
     }
 
     function getAdaptivePruneDistance() {
+      // A6 Fix: Under memory emergency, shrink sliding window to 25 frames
+      if (mobileMemoryEmergency) return 25;
       const isMob = width < 768 || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 1 && width < 1024);
       return isMob ? 50 : 130;
     }
@@ -312,7 +321,8 @@
       if (index < 0 || index >= FRAME_COUNT) return;
       const bm = frames[index];
       if (bm) {
-        if (typeof bm.close === 'function') {
+        // A2 Fix: Do not close bitmap if it is currently serving as the fallback frame
+        if (bm !== lastDrawnFallbackBitmap && typeof bm.close === 'function') {
           try {
             bm.close();
           } catch (_) {}
@@ -406,10 +416,11 @@
         .then((blob) => {
           if (!blob || gen !== currentTierGeneration) return null;
           if (USE_BITMAP) {
-            // Never downscale below canvas physical buffer size!
-            // If targetCanvasW >= currentDecodeW, decode at native source dimensions.
-            const targetW = Math.max(targetCanvasW, Math.min(currentDecodeW, 1920));
-            const targetH = Math.max(targetCanvasH, Math.min(currentDecodeH, 1080));
+            // A1 Fix: Maintain source aspect ratio and compute minimum dimensions to cover canvas
+            const sourceAspect = currentDecodeW / currentDecodeH;
+            const minCoverW = Math.max(targetCanvasW, Math.round(targetCanvasH * sourceAspect));
+            const targetW = Math.min(currentDecodeW, Math.max(1, minCoverW));
+            const targetH = Math.round(targetW / sourceAspect);
             return createImageBitmap(blob, {
               resizeWidth: targetW,
               resizeHeight: targetH,
@@ -434,6 +445,7 @@
           loadingSet.delete(index);
           if (!bm) return null;
 
+          consecutiveDecodeErrors = 0; // A6 Fix: Reset error count on successful decode
           const decodeMs = performance.now() - t0;
           stats.decodes++;
           stats.decodeMsTotal += decodeMs;
@@ -474,8 +486,27 @@
           }
           return bm;
         })
-        .catch(() => {
+        .catch((err) => {
           loadingSet.delete(index);
+          // A6 Fix: Consecutive decode failure safety check for mobile memory pressure
+          consecutiveDecodeErrors++;
+          if (consecutiveDecodeErrors >= 3) {
+            if (currentTier === '4k') {
+              if (isDebug) console.warn('[ScrollCanvas] Memory pressure detected: falling back to 1080p tier');
+              currentTier = '1080p';
+              currentFrameFolder = './frames-1080p';
+              currentDecodeW = 1920;
+              currentDecodeH = 1080;
+              currentTierGeneration++;
+              clearAllFrames();
+              preloadAnchorFrames();
+            } else if (!mobileMemoryEmergency) {
+              if (isDebug) console.warn('[ScrollCanvas] Memory pressure detected: shrinking sliding window');
+              mobileMemoryEmergency = true;
+              pruneDistantFrames(Math.round(currentFrame));
+            }
+            consecutiveDecodeErrors = 0;
+          }
           return null;
         });
     }
@@ -560,7 +591,16 @@
 
     // Continuous Low-Priority Background Preloader (requestIdleCallback + setTimeout fallback)
     function runBackgroundPreload() {
-      if (isUserScrolling || activeWorkers >= CONCURRENCY || cachedBlobCount >= FRAME_COUNT) {
+      // A5 Fix: Respect navigator.connection saveData and slow 2G/3G connections
+      const navConn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      const isSaveData = Boolean(navConn && (navConn.saveData || /2g|3g/.test(navConn.effectiveType || '')));
+      if (isSaveData) return;
+
+      if (cachedBlobCount >= FRAME_COUNT) return;
+
+      // A5 Fix: Reschedule if busy or scrolling so preloading never stalls
+      if (isUserScrolling || activeWorkers >= CONCURRENCY) {
+        scheduleBackgroundPreload(250);
         return;
       }
 
@@ -570,7 +610,11 @@
       };
 
       const idleCb = (deadline) => {
-        if (isUserScrolling || activeWorkers >= CONCURRENCY) return;
+        // A5 Fix: Reschedule on early exit
+        if (isUserScrolling || activeWorkers >= CONCURRENCY) {
+          scheduleNext(250);
+          return;
+        }
 
         const cur = Math.round(currentFrame);
         let nextIdx = -1;
@@ -591,13 +635,17 @@
         if (nextIdx !== -1) {
           const gen = currentTierGeneration;
           fetchBlob(nextIdx, gen).then(() => {
+            // A5 Fix: Route anchor decode through requestFrame + pumpQueue worker accounting
             if (nextIdx % ANCHOR_STRIDE === 0 && frames[nextIdx] === null && blobCache[nextIdx]) {
-              decodeFrame(nextIdx);
+              requestFrame(nextIdx, false, cur);
+              pumpQueue();
             }
             if (cachedBlobCount < FRAME_COUNT && !isUserScrolling) {
-              scheduleNext(25);
+              scheduleNext(35);
             }
           });
+        } else if (cachedBlobCount < FRAME_COUNT) {
+          scheduleNext(300);
         }
       };
 
@@ -839,12 +887,39 @@
       const resolvedFloor = isExact ? floorIdx : findNearestFrame(floorIdx, lastScrollDirection);
 
       if (resolvedFloor === -1) {
-        // Keep last drawn image on screen — never flash solid black or blank canvas!
+        // A2 Fix: Draw last known fallback bitmap if available to prevent black flash
+        if (lastDrawnFallbackBitmap) {
+          const rect = getInterpolatedDrawRect(position);
+          const { offsetX, offsetY, drawW, drawH, mode } = rect;
+          if (mode === 'phone-portrait' || mode === 'tablet-portrait') {
+            ctx.fillStyle = '#050308';
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(lastDrawnFallbackBitmap, offsetX, offsetY, drawW, drawH);
+            if (cachedTopGrad && cachedTopFadeH > 0) {
+              ctx.fillStyle = cachedTopGrad;
+              ctx.fillRect(0, 0, width, cachedTopFadeH);
+            }
+            if (cachedBotGrad && cachedBotFadeY > 0) {
+              ctx.fillStyle = cachedBotGrad;
+              ctx.fillRect(0, cachedBotFadeY, width, height - cachedBotFadeY);
+            }
+          } else {
+            ctx.drawImage(lastDrawnFallbackBitmap, offsetX, offsetY, drawW, drawH);
+          }
+        }
         return;
       }
 
       const baseImg = frames[resolvedFloor];
       if (!baseImg) return;
+
+      // A2 Fix: Safely retire previous fallback bitmap once replaced by current tier bitmap
+      if (lastDrawnFallbackBitmap && lastDrawnFallbackBitmap !== baseImg) {
+        if (!frames.includes(lastDrawnFallbackBitmap) && typeof lastDrawnFallbackBitmap.close === 'function') {
+          try { lastDrawnFallbackBitmap.close(); } catch (_) {}
+        }
+      }
+      lastDrawnFallbackBitmap = baseImg;
 
       if (isExact) stats.exactHits++;
       else stats.neighborHits++;
@@ -991,26 +1066,28 @@
     // PART 2: ADAPTIVE QUALITY GUARD
     // --------------------------------------------------------------------------
     function checkAdaptiveQualityGuard(frameTimeMs) {
+      // A3 Fix: Do not run guard while tab is hidden or page intro is playing
+      if (document.hidden || document.getElementById('page-intro')) return;
+
       frameDurationHistory.push(frameTimeMs);
       if (frameDurationHistory.length > 60) {
         frameDurationHistory.shift();
       }
 
       const now = performance.now();
-      if (now - lastQualityCheckTime > 1200) {
+      // A3 Fix: Cooldown at least 3s between DPR updates and require sustained samples (45+)
+      if (now - lastQualityCheckTime > 3000 && now - lastDprChangeTime > 3000) {
         lastQualityCheckTime = now;
-        if (frameDurationHistory.length >= 30) {
+        if (frameDurationHistory.length >= 45) {
           const avgFrameTime = frameDurationHistory.reduce((a, b) => a + b, 0) / frameDurationHistory.length;
-          // If average frame time stays above 20ms (> 50fps drop), step DPR down
-          if (avgFrameTime > 20.0 && userMaxDpr > 1.25) {
-            userMaxDpr = Math.max(1.25, userMaxDpr - 0.25);
-            if (isDebug) console.warn(`[ScrollCanvas Quality Guard] Dropped DPR cap to ${userMaxDpr.toFixed(2)} (avg frame time: ${avgFrameTime.toFixed(1)}ms)`);
-            resize();
-          } else if (avgFrameTime < 13.5 && userMaxDpr < (window.devicePixelRatio || 1)) {
-            // If performance stays excellent (< 13.5ms), step DPR cap back up
-            userMaxDpr = Math.min(2.0, Math.min(window.devicePixelRatio || 1, userMaxDpr + 0.25));
-            if (isDebug) console.log(`[ScrollCanvas Quality Guard] Raised DPR cap to ${userMaxDpr.toFixed(2)}`);
-            resize();
+          const rawDpr = window.devicePixelRatio || 1;
+          // Hysteresis: drop if frame time sustained > 22ms; raise if sustained < 11ms
+          if (avgFrameTime > 22.0 && userMaxDpr > 1.25) {
+            pendingDprCap = Math.max(1.25, userMaxDpr - 0.25);
+            if (isDebug) console.warn(`[ScrollCanvas Quality Guard] Queued DPR drop to ${pendingDprCap.toFixed(2)} (avg frame time: ${avgFrameTime.toFixed(1)}ms)`);
+          } else if (avgFrameTime < 11.0 && userMaxDpr < rawDpr) {
+            pendingDprCap = Math.min(2.0, Math.min(rawDpr, userMaxDpr + 0.25));
+            if (isDebug) console.log(`[ScrollCanvas Quality Guard] Queued DPR raise to ${pendingDprCap.toFixed(2)}`);
           }
         }
       }
@@ -1070,6 +1147,15 @@
         scheduleCarouselResume(150);
         scheduleBackgroundPreload(250);
         reportDebug(timestamp);
+
+        // A3 Fix: Apply DPR changes only when scroll is settled (zero in-scroll resize flicker)
+        if (pendingDprCap !== null && pendingDprCap !== userMaxDpr) {
+          userMaxDpr = pendingDprCap;
+          pendingDprCap = null;
+          lastDprChangeTime = performance.now();
+          resize(true);
+          renderFrame(currentFrame, true);
+        }
         return;
       }
 
@@ -1077,16 +1163,20 @@
       // Base ease ~11.5 for cinematic glide, scaling dynamically with velocity and distance.
       // Automatically accelerates on large distance delta, and smoothly eases down on arrival.
       const velNorm = Math.min(1, Math.abs(filteredScrollVelocity) / 32);
-      const distBoost = Math.min(7.5, absDelta * 0.16);
-      const dynamicEase = Math.min(22.0, 11.5 + velNorm * 4.5 + distBoost);
+      const distBoost = Math.min(8.5, absDelta * 0.18);
+      const dynamicEase = Math.min(26.0, 11.5 + velNorm * 4.5 + distBoost);
       const factor = 1 - Math.exp(-dynamicEase * dt);
 
-      // Frame skipping & fast catchup: move playhead swiftly toward target
+      // A7 Fix: Frame skipping & fast catchup for large scroll leaps (Home/End/scrollbar drag)
       if (absDelta > 6) {
         stats.skipped++;
       }
+      if (absDelta > 60) {
+        currentFrame += delta * Math.min(0.48, factor * 2.2);
+      } else {
+        currentFrame += delta * factor;
+      }
 
-      currentFrame += delta * factor;
       renderFrame(currentFrame);
       needsRender = false;
 
@@ -1112,11 +1202,14 @@
           lastTimestamp = 0;
         }
       } else {
+        // A7 Fix: Tab return restoration
+        updateLayoutCaches();
         pendingScrollY = window.scrollY || window.pageYOffset || 0;
         targetFrame = scrollYToFrame(pendingScrollY);
         currentFrame = targetFrame;
         scrollScheduled = false;
         lastTimestamp = 0;
+        ensureNeighborhood(Math.round(currentFrame), 0);
         renderFrame(currentFrame, true);
         scheduleLoop();
       }
@@ -1128,6 +1221,14 @@
       pendingScrollY = currentY;
       scrollScheduled = true;
       isUserScrolling = true;
+
+      // A7 Fix: In reduced-motion mode, update navigation spy but preserve static poster frame
+      if (REDUCE_MOTION) {
+        if (typeof NavigationController !== 'undefined') {
+          NavigationController.updateHeaderAndNav(currentY, height, cachedSectionOffsets);
+        }
+        return;
+      }
 
       // Compute scroll velocity from scroll-event timestamps
       if (lastScrollEventTime > 0) {
@@ -1255,6 +1356,16 @@
       updateAssetTier();
       updateLayoutCaches();
 
+      // A4 Fix: Orientation change listener to trigger full buffer rebuild and framing recomputation
+      window.addEventListener('orientationchange', () => {
+        setTimeout(() => resize(true), 150);
+      }, { passive: true });
+      if (window.screen && window.screen.orientation) {
+        window.screen.orientation.addEventListener('change', () => {
+          setTimeout(() => resize(true), 150);
+        });
+      }
+
       // Prefers-reduced-motion: render high-quality static poster frame, disable scroll scrubbing
       if (REDUCE_MOTION) {
         resize(true);
@@ -1267,6 +1378,7 @@
             }
           }).catch(() => {});
         });
+        initDocResizeObserver();
         return;
       }
 
@@ -1399,8 +1511,10 @@
     const store = window.PortfolioStore;
 
     function apply(profileData) {
-      if (!store) return;
-      const profile = profileData || store.getProfile();
+      // B12 Fix: Guard against undefined window.PortfolioStore
+      if (!store && !profileData) return;
+      const profile = profileData || (store && typeof store.getProfile === 'function' ? store.getProfile() : {});
+      if (!profile) return;
 
       document.querySelectorAll('[data-profile]').forEach((el) => {
         const key = el.dataset.profile;
@@ -1421,7 +1535,9 @@
 
       document.querySelectorAll('[data-profile-href]').forEach((el) => {
         const key = el.dataset.profileHref;
-        const rawUrl = store.normalizeExternalUrl(profile[key]);
+        const rawUrl = (store && typeof store.normalizeExternalUrl === 'function')
+          ? store.normalizeExternalUrl(profile[key])
+          : profile[key];
         const safeUrl = Security.sanitizeUrl(rawUrl);
         if (safeUrl) el.setAttribute('href', safeUrl);
       });
@@ -1429,8 +1545,9 @@
       document.querySelectorAll('[data-profile-mailto]').forEach((el) => {
         const key = el.dataset.profileMailto;
         const email = String(profile[key] || '').trim();
+        // B6 Fix: Use mailto:${email} without encoding @ into %40
         if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-          el.setAttribute('href', `mailto:${encodeURIComponent(email)}`);
+          el.setAttribute('href', `mailto:${email}`);
         }
       });
 
@@ -1729,6 +1846,8 @@
 
       carouselCylinder.innerHTML = '';
       carouselItems = [];
+      // B3 Fix: Reset lastClosestIndex on project/category change to keep dots synchronized
+      lastClosestIndex = -1;
 
       if (!visible || visible.length === 0) {
         const emptyMsg = document.createElement('div');
@@ -1782,58 +1901,106 @@
         card.style.setProperty('--card-opacity', '1');
 
         const imgSrc = Security.sanitizeImageUrl(proj.image);
-        const imgAlt = Security.escapeHTML(proj.title || 'Project preview');
-        const categoryText = Security.escapeHTML(proj.category || 'PROJECT');
+        const imgAlt = proj.title || 'Project preview';
+        const categoryText = proj.category || 'PROJECT';
         const indexNum = `#${String(slot.projectIndex + 1).padStart(2, '0')}`;
-        const titleText = Security.escapeHTML(proj.title || 'Untitled Project');
-        const descText = Security.escapeHTML(proj.description || '');
+        const titleText = proj.title || 'Untitled Project';
+        const descText = proj.description || '';
 
-        let linksHTML = '';
+        // B5 Fix: Build card DOM with createElement & textContent (zero XSS risk, valid markup)
+        const thumb = document.createElement('div');
+        thumb.className = 'project-thumb';
+
+        const img = document.createElement('img');
+        img.src = imgSrc;
+        img.alt = imgAlt;
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        thumb.appendChild(img);
+
+        const badge = document.createElement('span');
+        badge.className = 'project-badge';
+        badge.textContent = categoryText;
+        thumb.appendChild(badge);
+
+        const idxSpan = document.createElement('span');
+        idxSpan.className = 'project-index';
+        idxSpan.textContent = indexNum;
+        thumb.appendChild(idxSpan);
+
+        const body = document.createElement('div');
+        body.className = 'project-body';
+
+        const title = document.createElement('h3');
+        title.className = 'project-title';
+        title.textContent = titleText;
+        body.appendChild(title);
+
+        const desc = document.createElement('p');
+        desc.className = 'project-desc';
+        desc.textContent = descText;
+        body.appendChild(desc);
+
+        if (Array.isArray(proj.tags) && proj.tags.length > 0) {
+          const tagsDiv = document.createElement('div');
+          tagsDiv.className = 'project-tags';
+          proj.tags.slice(0, 3).forEach((t) => {
+            const tagSpan = document.createElement('span');
+            tagSpan.className = 'project-tag';
+            tagSpan.textContent = String(t);
+            tagsDiv.appendChild(tagSpan);
+          });
+          body.appendChild(tagsDiv);
+        }
+
+        const footer = document.createElement('div');
+        footer.className = 'project-footer';
+
         if (proj.liveUrl) {
           const liveSafe = Security.sanitizeUrl(proj.liveUrl);
           if (liveSafe) {
-            linksHTML += `<a href="${liveSafe}" target="_blank" rel="noopener noreferrer" class="project-link" aria-label="Visit live demo for ${titleText}">Live Demo ↗</a>`;
+            const a = document.createElement('a');
+            a.href = liveSafe;
+            a.target = '_blank';
+            a.rel = 'noopener noreferrer';
+            a.className = 'project-link';
+            a.setAttribute('aria-label', `Visit live demo for ${titleText}`);
+            a.textContent = 'Live Demo ↗';
+            footer.appendChild(a);
           }
         }
+
         if (proj.githubUrl) {
           const ghSafe = Security.sanitizeUrl(proj.githubUrl);
           if (ghSafe) {
-            linksHTML += `<a href="${ghSafe}" target="_blank" rel="noopener noreferrer" class="project-link project-link--muted" aria-label="View source code on GitHub for ${titleText}">Source ↗</a>`;
+            const a = document.createElement('a');
+            a.href = ghSafe;
+            a.target = '_blank';
+            a.rel = 'noopener noreferrer';
+            a.className = 'project-link project-link--muted';
+            a.setAttribute('aria-label', `View source code on GitHub for ${titleText}`);
+            a.textContent = 'Source ↗';
+            footer.appendChild(a);
           }
         }
+        body.appendChild(footer);
 
-        let tagsHTML = '';
-        if (Array.isArray(proj.tags)) {
-          tagsHTML = proj.tags
-            .slice(0, 3)
-            .map((t) => `<span class="project-tag">${Security.escapeHTML(t)}</span>`)
-            .join('');
-        }
+        card.appendChild(thumb);
+        card.appendChild(body);
 
-        card.innerHTML = `
-          <div class="project-thumb">
-            <img src="${imgSrc}" alt="${imgAlt}" loading="lazy" decoding="async" />
-            <span class="project-badge">${categoryText}</span>
-            <span class="project-index">${indexNum}</span>
-          </div>
-          <div class="project-body">
-            <h3 class="project-title">${titleText}</h3>
-            <p class="project-desc">${descText}</p>
-            ${tagsHTML ? `<div class="project-tags">${tagsHTML}</div>` : ''}
-            <div class="project-footer">
-              ${linksHTML}
-            </div>
-          </div>
-        `;
-
+        // B2 & B4 Fix: Card click rotates directly to clicked slot's angle; suppresses click on drag
         card.addEventListener('click', (e) => {
           if (hasDragged) {
             e.preventDefault();
             e.stopPropagation();
             return;
           }
-          if (sIdx !== lastClosestIndex && slotCount > 1) {
-            rotateToProjectIndex(slot.projectIndex);
+          if (e.target.closest('a')) return;
+          const rawTheta = (baseAngle + currentAngle) % 360;
+          const theta = ((rawTheta + 540) % 360) - 180;
+          if (Math.abs(theta) > 1 && slotCount > 1) {
+            targetAngle -= theta;
+            if (isCarouselInView) startCarouselLoop();
           }
         }, true);
 
@@ -1978,6 +2145,7 @@
 
         window.addEventListener('pointerup', endDrag);
         window.addEventListener('pointercancel', endDrag);
+        carouselStage.addEventListener('lostpointercapture', endDrag);
       }
 
       initVisibilityObserver();
@@ -2004,6 +2172,9 @@
     const serviceSelect = document.getElementById('inq-service');
     const toastStack = document.getElementById('toast-stack');
 
+    let lastActiveElement = null; // B9 Fix: Stores element that triggered modal for focus restoration
+    let isSubmitting = false;     // B1 Fix: Double-submission prevention flag
+
     function showToast(message) {
       if (!toastStack) return;
       const item = document.createElement('div');
@@ -2013,23 +2184,37 @@
       setTimeout(() => item.remove(), 3600);
     }
 
-    function openContactModal(serviceName) {
+    function openContactModal(serviceName, triggerEl) {
       if (typeof NavigationController !== 'undefined') {
         NavigationController.closeMobileMenu();
       }
       if (!modal) return;
+      // B9 Fix: Store focus trigger and configure accessible modal dialog attributes
+      lastActiveElement = triggerEl || document.activeElement;
+      modal.setAttribute('role', 'dialog');
+      modal.setAttribute('aria-modal', 'true');
+
       if (serviceName && serviceSelect) {
         const hasOpt = Array.from(serviceSelect.options).some((o) => o.value === serviceName);
         if (hasOpt) serviceSelect.value = serviceName;
       }
       modal.hidden = false;
+      document.body.style.overflow = 'hidden'; // B9 Fix: Lock body scroll while modal is active
+
       const nameInput = document.getElementById('inq-name');
       if (nameInput) nameInput.focus();
     }
 
     function closeContactModal() {
-      if (!modal) return;
+      if (!modal || modal.hidden) return;
       modal.hidden = true;
+      document.body.style.overflow = ''; // B9 Fix: Restore body scroll
+
+      // B9 Fix: Return focus to trigger element that opened modal
+      if (lastActiveElement && typeof lastActiveElement.focus === 'function') {
+        try { lastActiveElement.focus(); } catch (_) {}
+        lastActiveElement = null;
+      }
     }
 
     function bindLogoAdminToggle(wrapId, triggerId, linkId) {
@@ -2057,13 +2242,13 @@
     function init() {
       document.querySelectorAll('[data-open-contact]').forEach((btn) => {
         btn.addEventListener('click', () => {
-          openContactModal(btn.dataset.openContact || '');
+          openContactModal(btn.dataset.openContact || '', btn);
         });
         if (btn.getAttribute('role') === 'button') {
           btn.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();
-              openContactModal(btn.dataset.openContact || '');
+              openContactModal(btn.dataset.openContact || '', btn);
             }
           });
         }
@@ -2076,6 +2261,29 @@
       if (modal) {
         modal.addEventListener('click', (e) => {
           if (e.target === modal) closeContactModal();
+        });
+
+        // B9 Fix: Accessible focus trap on Tab key
+        modal.addEventListener('keydown', (e) => {
+          if (modal.hidden) return;
+          if (e.key === 'Tab') {
+            const focusable = modal.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])');
+            if (focusable.length === 0) return;
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+
+            if (e.shiftKey) {
+              if (document.activeElement === first) {
+                e.preventDefault();
+                last.focus();
+              }
+            } else {
+              if (document.activeElement === last) {
+                e.preventDefault();
+                first.focus();
+              }
+            }
+          }
         });
       }
 
@@ -2091,6 +2299,8 @@
       if (inquiryForm) {
         inquiryForm.addEventListener('submit', async (e) => {
           e.preventDefault();
+          if (isSubmitting) return; // B1 Fix: Prevent double submits
+
           const nameInput = document.getElementById('inq-name');
           const emailInput = document.getElementById('inq-email');
           const detailsInput = document.getElementById('inq-details');
@@ -2100,18 +2310,36 @@
           const service = serviceSelect ? serviceSelect.value : '';
           const details = detailsInput ? Security.sanitizeText(detailsInput.value) : '';
 
-          if (!name || !email || !details) return;
+          if (!name || !email || !details) {
+            showToast('Please fill out all required fields.');
+            return;
+          }
+
+          // B1 Fix: Client-side email validation with clear error feedback
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            showToast('Please enter a valid email address.');
+            if (emailInput) emailInput.focus();
+            return;
+          }
+
           const submitBtn = inquiryForm.querySelector('button[type="submit"]');
           if (submitBtn) submitBtn.disabled = true;
+          isSubmitting = true;
 
           try {
-            if (store) {
+            if (store && typeof store.addInquiry === 'function') {
               await store.addInquiry({ name, email, service, details });
             }
+            // Reset and close only on success
             inquiryForm.reset();
             closeContactModal();
             showToast('Inquiry received! Hamood will respond shortly.');
+          } catch (err) {
+            // B1 Fix: Keep form values intact and notify user with error toast
+            console.error('[InquiryController] Submission failed:', err);
+            showToast('Something went wrong. Please try again or email me directly.');
           } finally {
+            isSubmitting = false;
             if (submitBtn) submitBtn.disabled = false;
           }
         });
@@ -2160,8 +2388,26 @@
         if (!isMobile) {
           // Laptop / Desktop: copy phone number to clipboard instantly
           e.preventDefault();
+          // B7 Fix: Read phone number dynamically from DOM, store, or tel link without hardcoding
           const phoneValEl = phoneCard.querySelector('[data-profile="phone"]');
-          const rawPhone = phoneValEl ? phoneValEl.textContent.trim() : '+92 343 6956890';
+          let rawPhone = phoneValEl ? phoneValEl.textContent.trim() : '';
+
+          if (!rawPhone && store && typeof store.getProfile === 'function') {
+            const profile = store.getProfile();
+            rawPhone = profile && profile.phone ? String(profile.phone).trim() : '';
+          }
+
+          if (!rawPhone) {
+            const telHref = phoneCard.getAttribute('href');
+            if (telHref && telHref.startsWith('tel:')) {
+              rawPhone = telHref.replace('tel:', '').trim();
+            }
+          }
+
+          if (!rawPhone) {
+            InquiryController.showToast('Phone number could not be copied.');
+            return;
+          }
 
           const notifySuccess = () => {
             InquiryController.showToast(`Phone number copied to clipboard: ${rawPhone}`);
@@ -2183,20 +2429,43 @@
     }
 
     let cloudSyncInFlight = false;
+    let lastCloudSyncTime = 0;
+    let lastCachedProfileHash = '';
+    let lastCachedProjectsHash = '';
+
+    // B8 Fix: 15-second debounce and data-hash change comparison before re-rendering
     async function syncFromCloud() {
       if (!store || cloudSyncInFlight) return;
+      const now = performance.now();
+      if (now - lastCloudSyncTime < 15000) return;
       cloudSyncInFlight = true;
+      lastCloudSyncTime = now;
+
       try {
-        const [{ profile }, { projects }] = await Promise.all([
-          store.fetchProfile(),
-          store.fetchProjects(),
-        ]);
-        if (profile) ProfileHydration.apply(profile);
-        if (Array.isArray(projects)) {
-          CarouselEngine.renderProjects(projects);
+        const fetchProf = typeof store.fetchProfile === 'function' ? store.fetchProfile() : Promise.resolve({});
+        const fetchProj = typeof store.fetchProjects === 'function' ? store.fetchProjects() : Promise.resolve({});
+        const [profileRes, projectsRes] = await Promise.all([fetchProf, fetchProj]);
+
+        const profile = profileRes && profileRes.profile ? profileRes.profile : null;
+        const projects = projectsRes && Array.isArray(projectsRes.projects) ? projectsRes.projects : null;
+
+        if (profile) {
+          const profHash = JSON.stringify(profile);
+          if (profHash !== lastCachedProfileHash) {
+            lastCachedProfileHash = profHash;
+            ProfileHydration.apply(profile);
+          }
         }
-      } catch {
-        // Fallback gracefully to offline cache
+
+        if (projects) {
+          const projHash = JSON.stringify(projects);
+          if (projHash !== lastCachedProjectsHash) {
+            lastCachedProjectsHash = projHash;
+            CarouselEngine.renderProjects(projects);
+          }
+        }
+      } catch (err) {
+        console.warn('[SyncAndClipboard] Cloud sync skipped or failed:', err);
       } finally {
         cloudSyncInFlight = false;
       }
@@ -2206,7 +2475,7 @@
       if (store && typeof store.subscribeToLiveUpdates === 'function') {
         store.subscribeToLiveUpdates(() => {
           ProfileHydration.apply();
-          CarouselEngine.renderProjects(store.getProjects());
+          CarouselEngine.renderProjects(store.getProjects ? store.getProjects() : []);
           syncFromCloud();
         });
       }
@@ -2283,17 +2552,27 @@
     }
 
     function init() {
+      // B10 Fix: Disable text scramble effect for prefers-reduced-motion and touch devices
+      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0) || (window.innerWidth < 1024);
+      if (reduceMotion || isTouch) return;
+
       const textEls = document.querySelectorAll('[data-recreate-text]');
       textEls.forEach((el) => {
         const original = el.textContent;
         el.dataset.originalText = original;
 
+        // B10 Fix: Screen reader accessibility: static text in .sr-only span, scramble node aria-hidden
+        const srOnly = document.createElement('span');
+        srOnly.style.cssText = 'position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;';
+        srOnly.textContent = original;
+
         const wrap = document.createElement('span');
         wrap.className = 'rewrite-wrap';
+        wrap.setAttribute('aria-hidden', 'true');
 
         const sizer = document.createElement('span');
         sizer.className = 'rewrite-sizer';
-        sizer.setAttribute('aria-hidden', 'true');
         sizer.textContent = original;
 
         const live = document.createElement('span');
@@ -2302,7 +2581,7 @@
 
         wrap.append(sizer, live);
         el.textContent = '';
-        el.appendChild(wrap);
+        el.append(srOnly, wrap);
         el._liveNode = live;
         el._stopTimer = null;
       });
@@ -2313,7 +2592,11 @@
             const original = el.dataset.originalText || '';
             const live = el._liveNode;
             if (!live || !original) return;
-            if (typeof el._stopTimer === 'function') el._stopTimer();
+            // B10 Fix: Clean up existing timer before starting new one
+            if (typeof el._stopTimer === 'function') {
+              el._stopTimer();
+              el._stopTimer = null;
+            }
 
             restartClass(live, 'recreate-glow');
             const duration = Number(el.dataset.duration) || 1100;
@@ -2328,6 +2611,19 @@
 
           card.querySelectorAll('[data-recreate-wipe]').forEach((el) => {
             restartClass(el, 'recreate-wipe');
+          });
+        });
+
+        // B10 Fix: Cleanup timers and restore stable text on fast mouseleave
+        card.addEventListener('mouseleave', () => {
+          card.querySelectorAll('[data-recreate-text]').forEach((el) => {
+            if (typeof el._stopTimer === 'function') {
+              el._stopTimer();
+              el._stopTimer = null;
+            }
+            if (el._liveNode && el.dataset.originalText) {
+              el._liveNode.textContent = el.dataset.originalText;
+            }
           });
         });
       });
@@ -2351,13 +2647,25 @@
         return;
       }
 
+      // B11 Fix: Hard timeout safety net ensures intro is removed after 2200ms regardless of transition events
+      const hardTimeout = setTimeout(() => {
+        if (intro && intro.parentNode) {
+          intro.remove();
+        }
+      }, 2200);
+
       const finish = () => {
+        clearTimeout(hardTimeout);
         intro.classList.add('is-done');
-        setTimeout(() => intro.remove(), 400);
+        setTimeout(() => {
+          if (intro && intro.parentNode) intro.remove();
+        }, 400);
       };
 
       const startReveal = () => {
         if (intro.classList.contains('is-leaving')) return;
+        // B11 Fix: Immediately allow pointer events to pass through once leaving
+        intro.style.pointerEvents = 'none';
         intro.classList.add('is-leaving');
         setTimeout(finish, 780);
       };
@@ -2373,7 +2681,12 @@
      MODULE 11: APPLICATION BOOTSTRAP & ORCHESTRATION
      Initializes subsystems in deterministic sequence with zero global pollution
      ========================================================================== */
+  let hasBootstrapped = false;
   function bootstrap() {
+    // B12 Fix: Ensure listeners are registered once (no duplicate handlers)
+    if (hasBootstrapped) return;
+    hasBootstrapped = true;
+
     PageIntro.run();
     ProfileHydration.apply();
     NavigationController.init();
@@ -2388,11 +2701,28 @@
       window.__SCROLL_OVERLAY__ = (enabled) => ScrollCanvasEngine.setDebugOverlay(enabled);
       window.addEventListener('scroll', ScrollCanvasEngine.onNativeScroll, { passive: true });
       window.addEventListener('resize', ScrollCanvasEngine.onDebouncedResize, { passive: true });
+
+      // B12 Fix: Trigger layout cache refresh when document fonts and images load
+      if (document.fonts && typeof document.fonts.ready === 'object' && typeof document.fonts.ready.then === 'function') {
+        document.fonts.ready.then(() => {
+          setTimeout(() => {
+            if (ScrollCanvasEngine) {
+              ScrollCanvasEngine.updateLayoutCaches();
+              ScrollCanvasEngine.onNativeScroll();
+            }
+          }, 60);
+        });
+      }
+
       window.addEventListener(
         'load',
         () => {
-          ScrollCanvasEngine.updateLayoutCaches();
-          ScrollCanvasEngine.onNativeScroll();
+          setTimeout(() => {
+            if (ScrollCanvasEngine) {
+              ScrollCanvasEngine.updateLayoutCaches();
+              ScrollCanvasEngine.onNativeScroll();
+            }
+          }, 60);
         },
         { passive: true },
       );
