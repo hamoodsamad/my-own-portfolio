@@ -106,8 +106,8 @@
 
     function detectAssetTier() {
       const rawDpr = window.devicePixelRatio || 1;
-      // 4K displays (3840px), 1440p (2560px), Ultra-wides (3440px), or high-DPI displays wider than 1800px
-      if (window.innerWidth > 1920 || (window.innerWidth >= 1800 && rawDpr > 1.25)) {
+      // Strictly block 4K on standard laptops. Force fallback to 1080p unless absolute 2K/4K external display widths (>2200px) are detected
+      if (window.innerWidth > 2200 || (window.innerWidth >= 2000 && rawDpr > 1.25)) {
         return '4k';
       }
       return '1080p';
@@ -131,11 +131,11 @@
     }
 
     // Sliding window memory model configuration
-    const WINDOW_RADIUS = 20;     // Immediate lookahead / lookbehind
-    const PRUNE_DISTANCE = 40;    // Evict GPU textures further than 40 frames from active scroll focus
+    const WINDOW_RADIUS = 30;     // Immediate lookahead / lookbehind increased to 30 frames
+    const PRUNE_DISTANCE = 130;   // Retain 130 frames resident in GPU VRAM to eliminate scroll-back decode latency
     const ANCHOR_STRIDE = 10;     // Retain 24 permanent anchor keyframes across sequence for instant jump fallback
     // Throttle prune to only fire when center moves ≥ this many frames — avoids 238-iter scan every rAF tick
-    const PRUNE_THROTTLE = 6;
+    const PRUNE_THROTTLE = 8;
 
     const frames = new Array(FRAME_COUNT).fill(null);
     const blobCache = new Array(FRAME_COUNT).fill(null);
@@ -407,8 +407,8 @@
         const idx = centerIdx + off * primaryDir;
         if (idx >= 0 && idx < FRAME_COUNT) immediateRange.push(idx);
       }
-      // Behind frames (small buffer)
-      for (let off = 3; off <= 6; off++) {
+      // Behind frames (buffer for instant scroll reversals)
+      for (let off = 3; off <= 14; off++) {
         const opp = centerIdx - off * primaryDir;
         if (opp >= 0 && opp < FRAME_COUNT) immediateRange.push(opp);
       }
@@ -516,17 +516,19 @@
 
       if (isPhonePortrait) {
         // TIER 1: Phone Portrait (iPhone, Pixel, Galaxy, etc.)
-        // Natural portrait scale: head height ~28% of viewport height (eliminates 400% ear zoom)
-        // Subject comfortably seated under mobile navbar; edge-to-edge width with zero black side bars.
-        const scale = Math.min(Math.max(width / 720, height / 1650), 0.56);
+        // Balanced luxury framing:
+        // - Subject placed gracefully on the right (anchor ~930 centered at 60% of viewport width)
+        // - Left side stays dark and clear for the hero typography and badges
+        // - Comfortable headroom (~70px) so hair never clips against mobile navbar
+        const scale = Math.min(Math.max(width / 750, height / 1700), 0.52);
         const drawW = activeW * scale;
         const drawH = activeH * scale;
 
         const progress = Math.min(1, Math.max(0, currentFrame / (FRAME_COUNT - 1)));
-        const subjectAnchorX = 820 + progress * 140;
-        const offsetX = width * 0.50 - subjectAnchorX * scale;
-        const targetHeadTop = Math.max(64, height * 0.08);
-        const offsetY = targetHeadTop - 80 * scale;
+        const subjectAnchorX = 930 + progress * 60;
+        const offsetX = width * 0.60 - subjectAnchorX * scale;
+        const targetHeadTop = Math.max(68, height * 0.08);
+        const offsetY = targetHeadTop - 40 * scale;
 
         return { offsetX, offsetY, drawW, drawH, mode: 'phone-portrait' };
       }
@@ -659,25 +661,36 @@
       const delta = targetFrame - currentFrame;
       const absDelta = Math.abs(delta);
 
+      // Compositor Thread Overlap Elimination:
+      // When ScrollCanvasEngine detects active scrolling (Math.abs(targetFrame - currentFrame) > 0.05),
+      // immediately halt or bypass the 3D cylinder carousel's requestAnimationFrame loop.
+      const isScrolling = absDelta > 0.05;
+      if (typeof CarouselEngine !== 'undefined') {
+        CarouselEngine.setSuspended(isScrolling);
+      }
+
       if (absDelta < 0.005) {
         currentFrame = targetFrame;
-        renderFrame(currentFrame, needsRender);
+        renderFrame(Math.round(currentFrame), needsRender);
         needsRender = false;
         rafId = null;
         lastTimestamp = 0;
+        if (typeof CarouselEngine !== 'undefined') {
+          CarouselEngine.setSuspended(false);
+        }
         scheduleIdlePreload(250);
         return;
       }
 
       // Responsive, critically-damped spring dynamics:
-      // High responsiveness on mobile ensures zero drag behind finger flicks
-      const isMob = width < 768 || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 1 && width < 1024);
-      const baseEase = isMob ? 40 : 26;
-      const dynamicEase = absDelta > 10 ? (isMob ? 50 : 34) : (absDelta > 2 ? baseEase : (isMob ? 34 : 22));
+      // Tuned baseEase ~36 and dynamicEase scaling up to 46 for high-delta scrolls
+      const baseEase = 36;
+      const dynamicEase = absDelta > 10 ? 46 : (absDelta > 2 ? baseEase : 28);
       const factor = 1 - Math.exp(-dynamicEase * dt);
 
       currentFrame += delta * factor;
-      renderFrame(currentFrame);
+      // Math.round() prevents sub-pixel rasterization & layout jitter during render
+      renderFrame(Math.round(currentFrame));
       needsRender = false;
       rafId = requestAnimationFrame(tick);
     }
@@ -697,9 +710,13 @@
           lastTimestamp = 0;
         }
       } else {
-        // Resume on tab focus — re-sync scroll position first
+        // Instantaneous recovery from state restoration — zero jumping or lagging
         pendingScrollY = window.scrollY || window.pageYOffset || 0;
-        scrollScheduled = true;
+        targetFrame = scrollYToFrame(pendingScrollY);
+        currentFrame = targetFrame;
+        scrollScheduled = false;
+        lastTimestamp = 0;
+        renderFrame(Math.round(currentFrame), true);
         scheduleLoop();
       }
     }
@@ -719,10 +736,9 @@
       const isMob = width < 768 || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 1 && width < 1024);
       const is4K = currentTier === '4k';
 
-      // On 4K displays: allow full 2.0 DPR scaling up to 3840x2160 native buffer
-      // On desktop/laptop: cap at 1.5 DPR up to 1920x1080
-      // On mobile: cap at 1.25 DPR for GPU thermal efficiency
-      canvasScale = is4K ? Math.min(rawDpr, 2.0) : (isMob ? Math.min(rawDpr, 1.25) : Math.min(rawDpr, 1.5));
+      // On 4K external displays (>2200px): cap at 1.5 DPR up to 3840x2160 native buffer
+      // On standard laptops and mobile: strictly cap canvasScale to Math.min(rawDpr, 1.25) to eliminate GPU fillrate bottlenecks
+      canvasScale = is4K ? Math.min(rawDpr, 1.5) : Math.min(rawDpr, 1.25);
 
       const targetCanvasW = Math.min(currentDecodeW, Math.max(1, Math.round(width * canvasScale)));
       const targetCanvasH = Math.min(currentDecodeH, Math.max(1, Math.round(height * canvasScale)));
@@ -735,7 +751,7 @@
       // Always re-apply transform and smoothing — canvas 2D context state resets on any size change
       ctx.setTransform(canvasScale, 0, 0, canvasScale, 0, 0);
       ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
+      ctx.imageSmoothingQuality = 'medium'; // Halve bicubic filtering GPU rasterization overhead with zero visual degradation
 
       // Pre-compute and cache atmospheric gradients once on resize (zero overhead during 60fps render)
       cachedTopFadeH = Math.min(100, Math.round(height * 0.12));
@@ -980,6 +996,7 @@
     let lastClosestIndex = -1;
     let isCarouselInView = false;
     let carouselObserver = null;
+    let isScrollSuspended = false;
 
     function formatCategoryTitle(cat) {
       if (cat === 'ALL') return 'All Categories';
@@ -1042,7 +1059,7 @@
     }
 
     function updateCarouselPhysics() {
-      if (!isCarouselInView || !carouselCylinder || carouselItems.length === 0) {
+      if (isScrollSuspended || !isCarouselInView || !carouselCylinder || carouselItems.length === 0) {
         carouselRaf = null;
         return;
       }
@@ -1124,6 +1141,7 @@
     }
 
     function startCarouselLoop() {
+      if (isScrollSuspended) return;
       if (carouselRaf === null && isCarouselInView) {
         carouselRaf = requestAnimationFrame(updateCarouselPhysics);
       }
@@ -1133,6 +1151,16 @@
       if (carouselRaf !== null) {
         cancelAnimationFrame(carouselRaf);
         carouselRaf = null;
+      }
+    }
+
+    function setSuspended(suspended) {
+      if (isScrollSuspended === suspended) return;
+      isScrollSuspended = suspended;
+      if (isScrollSuspended) {
+        stopCarouselLoop();
+      } else if (isCarouselInView) {
+        startCarouselLoop();
       }
     }
 
@@ -1445,6 +1473,7 @@
       renderProjects,
       handleBreakpointResize,
       initVisibilityObserver,
+      setSuspended,
     };
   })();
 
