@@ -18,6 +18,7 @@ import {
 import {
   initScrollEngine,
   onNativeScroll,
+  onLenisScroll,
   onDebouncedResize,
   resize,
   updateLayoutCaches,
@@ -26,6 +27,12 @@ import {
   setDebug,
   getEngineStats,
 } from './scrollEngine.js';
+import {
+  initSmoothScroll,
+  initScrollAnimations,
+  scrollToTarget,
+  SmoothScrollEngine,
+} from './smoothScroll.js';
 import {
   initNavigation,
   updateHeaderAndNav,
@@ -122,6 +129,14 @@ export function bootstrap() {
       },
       { passive: true },
     );
+
+    // Initialize Lenis Smooth Momentum Scroll synchronized with GSAP ScrollTrigger
+    initSmoothScroll((e) => {
+      onLenisScroll(e);
+    });
+
+    // Initialize subtle GSAP scroll-triggered entrance reveals
+    initScrollAnimations();
   }
 
   // 4. Initial cloud sync
@@ -137,6 +152,7 @@ window.InquiryController = InquiryController;
 window.SyncAndClipboard = SyncAndClipboard;
 window.TextRecreationEngine = TextRecreationEngine;
 window.PageIntro = PageIntro;
+window.SmoothScrollEngine = SmoothScrollEngine;
 
 // Auto-bootstrap on DOMContentLoaded
 if (document.readyState === 'loading') {

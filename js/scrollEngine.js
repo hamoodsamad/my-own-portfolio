@@ -61,6 +61,7 @@ let resizeDebounceTimer = null;
 // Telemetry & Debug
 let isDebug = false;
 let lastDebugReport = 0;
+let isLenisControlled = false;
 
 // Subsystem callbacks
 let onScrollNavUpdate = null;
@@ -163,10 +164,90 @@ export function scheduleLoop() {
   }
 }
 
+export function setIsLenisControlled(val) {
+  isLenisControlled = Boolean(val);
+}
+
+/**
+ * High-precision synchronous scroll handler called on every Lenis / GSAP tick.
+ * Synchronizes the canvas background frame directly with the DOM virtual scroll position
+ * guaranteeing 1:1 lockstep with ZERO rubber-banding or lagging delay.
+ */
+export function onLenisScroll(e) {
+  isLenisControlled = true;
+  const currentY = (e && typeof e.scroll === 'number') ? e.scroll : (window.scrollY || window.pageYOffset || 0);
+  pendingScrollY = currentY;
+  isUserScrolling = true;
+
+  if (typeof onCarouselSuspend === 'function') {
+    onCarouselSuspend();
+  }
+
+  if (REDUCE_MOTION) {
+    if (typeof onScrollNavUpdate === 'function') {
+      onScrollNavUpdate(currentY, height, cachedSectionOffsets);
+    }
+    return;
+  }
+
+  if (e && e.direction) {
+    lastScrollDirection = e.direction >= 0 ? 1 : -1;
+  }
+  if (e && typeof e.velocity === 'number') {
+    const rawVelFrames = (e.velocity / (maxScrollCache || 1)) * (FRAME_COUNT - 1);
+    filteredScrollVelocity = filteredScrollVelocity * 0.60 + rawVelFrames * 0.40;
+  }
+
+  if (userScrollStopTimer) clearTimeout(userScrollStopTimer);
+  userScrollStopTimer = setTimeout(() => {
+    isUserScrolling = false;
+    scheduleBackgroundPreload(150, currentFrame, false);
+    if (typeof onCarouselResume === 'function') {
+      onCarouselResume();
+    }
+  }, 160);
+
+  const newTarget = scrollYToFrame(pendingScrollY);
+  targetFrame = newTarget;
+  currentFrame = targetFrame;
+
+  if (Math.abs(pendingScrollY - lastNavScrollY) > 8) {
+    lastNavScrollY = pendingScrollY;
+    if (typeof onScrollNavUpdate === 'function') {
+      onScrollNavUpdate(pendingScrollY, height, cachedSectionOffsets);
+    }
+  }
+
+  const roundedTarget = Math.round(targetFrame);
+  if (roundedTarget !== lastNeighborhoodCenter) {
+    lastNeighborhoodCenter = roundedTarget;
+    const absVel = Math.abs(filteredScrollVelocity);
+    const velocityBias = absVel > 3
+      ? Math.min(Math.round(absVel * 0.22), 12) * lastScrollDirection
+      : 0;
+    ensureNeighborhood(
+      Math.max(0, Math.min(FRAME_COUNT - 1, roundedTarget + velocityBias)),
+      lastScrollDirection,
+      filteredScrollVelocity,
+      targetCanvasW,
+      targetCanvasH,
+      width
+    );
+    pruneDistantFrames(roundedTarget, width);
+  }
+
+  renderFrame(currentFrame, cachedStartDrawRect, cachedEndDrawRect, lastScrollDirection);
+}
+
 /**
  * Scroll event handler with low-pass velocity calculation
  */
 export function onNativeScroll(e) {
+  // If Lenis is actively controlling the smooth virtual scroll, ignore duplicate native scroll events
+  if (isLenisControlled && e && e.type === 'scroll') {
+    return;
+  }
+
   const now = (e && e.timeStamp) ? e.timeStamp : performance.now();
   const currentY = window.scrollY || window.pageYOffset || 0;
   pendingScrollY = currentY;

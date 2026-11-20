@@ -4,6 +4,8 @@
  * smooth anchor link navigation with destination frame prefetching, and mobile drawer menu.
  */
 
+import { scrollToTarget } from './smoothScroll.js';
+
 let header = null;
 let navToggle = null;
 let mobileMenu = null;
@@ -98,7 +100,9 @@ export function initNavigation() {
             window.ScrollCanvasEngine.prefetchDestination(destScrollY);
           }
 
-          targetEl.scrollIntoView({ behavior: 'smooth' });
+          if (!scrollToTarget(targetEl, { offset: -10 })) {
+            targetEl.scrollIntoView({ behavior: 'smooth' });
+          }
           if (mobileMenu && !mobileMenu.hidden) closeMobileMenu();
         }
       }
