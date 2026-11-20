@@ -943,6 +943,39 @@ button {
   transform: scale(1.03);
 }
 
+@keyframes holoGlitch {
+  0% {
+    filter: contrast(1.1) saturate(1.1) brightness(1);
+    transform: scale(1);
+  }
+  20% {
+    filter: contrast(1.4) saturate(1.6) brightness(1.25) hue-rotate(15deg);
+    transform: scale(1.02) skewX(1.5deg);
+  }
+  40% {
+    filter: contrast(1.7) saturate(2.0) brightness(1.4) drop-shadow(0 0 14px rgba(255, 87, 25, 0.7));
+    transform: scale(1.03) skewX(-1.5deg);
+  }
+  60% {
+    filter: contrast(1.2) saturate(1.3) brightness(1.1);
+    transform: scale(1.01) skewX(0.5deg);
+  }
+  100% {
+    filter: contrast(1.06) saturate(1.08) brightness(1);
+    transform: scale(1.03);
+  }
+}
+
+.holo-frame.is-glitching .holo-img,
+.holo-frame:hover .holo-img {
+  animation: holoGlitch 0.85s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.holo-frame.is-glitching .holo-scanline,
+.holo-frame:hover .holo-scanline {
+  animation: holoScan 1.2s ease-out;
+}
+
 .holo-scanline {
   position: absolute;
   left: 0;
@@ -1518,8 +1551,8 @@ button {
 
 .carousel-cylinder {
   position: relative;
-  width: 270px;
-  height: 360px;
+  width: var(--carousel-card-w, 280px);
+  height: var(--carousel-card-h, 380px);
   transform-style: preserve-3d;
   will-change: transform;
 }
@@ -1527,8 +1560,8 @@ button {
 .carousel-card {
   position: absolute;
   inset: 0;
-  width: 270px;
-  height: 360px;
+  width: var(--carousel-card-w, 280px);
+  height: var(--carousel-card-h, 380px);
   border-radius: 18px;
   background: rgba(18, 14, 26, 0.94);
   border: 1px solid rgba(255, 255, 255, 0.13);
@@ -1638,16 +1671,53 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   padding-top: 8px;
   margin-top: auto;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.carousel-card .project-view-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(255, 87, 25, 0.95), rgba(255, 120, 60, 0.9));
+  color: #ffffff;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-decoration: none;
+  box-shadow: 0 4px 14px rgba(255, 87, 25, 0.35);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.carousel-card .project-view-btn:hover {
+  background: linear-gradient(135deg, #ff6b35, #ff946b);
+  transform: translateY(-1px) scale(1.03);
+  box-shadow: 0 6px 20px rgba(255, 87, 25, 0.55);
+  color: #ffffff;
+}
+
+.carousel-card .project-arrow {
+  display: inline-block;
+  font-size: 0.86rem;
+  font-weight: 800;
+  transition: transform 0.2s ease;
+}
+
+.carousel-card .project-view-btn:hover .project-arrow {
+  transform: translate(2px, -2px);
 }
 
 .carousel-card .project-link {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 0.76rem;
+  font-size: 0.74rem;
   font-weight: 600;
   color: var(--accent);
   transition: color 0.2s ease, transform 0.2s ease;
@@ -1659,7 +1729,7 @@ button {
 }
 
 .carousel-card .project-link--muted {
-  font-size: 0.72rem;
+  font-size: 0.70rem;
   color: var(--text-muted);
 }
 
@@ -2420,6 +2490,48 @@ a.contact-card:hover {
 }
 
 @media (max-width: 600px) {
+  .projects {
+    padding-block: clamp(44px, 8vh, 76px);
+  }
+
+  .carousel-stage {
+    height: 355px;
+    margin-block: 8px 12px;
+    perspective: 750px;
+  }
+
+  .carousel-card .project-body {
+    padding: 10px 12px;
+    gap: 4px;
+  }
+
+  .carousel-card .project-title {
+    font-size: 0.88rem;
+  }
+
+  .carousel-card .project-desc {
+    font-size: 0.72rem;
+    -webkit-line-clamp: 2;
+  }
+
+  .carousel-card .project-view-btn {
+    padding: 5px 12px;
+    font-size: 0.70rem;
+  }
+
+  .carousel-nav-btn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .carousel-nav-btn--prev {
+    left: 2px;
+  }
+
+  .carousel-nav-btn--next {
+    right: 2px;
+  }
+
   .services-grid {
     grid-template-columns: minmax(0, 1fr);
   }

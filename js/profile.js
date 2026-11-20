@@ -14,7 +14,17 @@ export function applyProfileHydration(profileData) {
 
   document.querySelectorAll('[data-profile]').forEach((el) => {
     const key = el.dataset.profile;
-    if (profile[key]) el.textContent = Security.sanitizeText(profile[key]);
+    if (profile[key]) {
+      const sanitized = Security.sanitizeText(profile[key]);
+      if (el._liveNode) {
+        el.dataset.originalText = sanitized;
+        el._liveNode.textContent = sanitized;
+        const sizer = el.querySelector('.rewrite-sizer');
+        if (sizer) sizer.textContent = sanitized;
+      } else {
+        el.textContent = sanitized;
+      }
+    }
   });
 
   document.querySelectorAll('[data-profile-multiline]').forEach((el) => {

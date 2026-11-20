@@ -50,7 +50,7 @@
         'Ultra-luxury horology storefront engineered for crisp product presentation, smooth browsing, and high conversion.',
       image:
         'https://images.unsplash.com/photo-1523170335258-f5ed11844a49?auto=format&fit=crop&w=900&q=80',
-      link: '',
+      link: 'https://github.com/hamoodsamad',
     },
     {
       id: 'proj-2',
@@ -60,7 +60,7 @@
         'Quiet-luxury architectural archive showcasing spatial design work with editorial grids and fluid responsiveness.',
       image:
         'https://images.unsplash.com/photo-1618221195710-dd6b41faaea6?auto=format&fit=crop&w=900&q=80',
-      link: '',
+      link: 'https://github.com/hamoodsamad',
     },
     {
       id: 'proj-3',
@@ -70,7 +70,7 @@
         'High-converting athletic funnel featuring interactive membership flows, dynamic visual hierarchy, and mobile-first speed.',
       image:
         'https://images.unsplash.com/photo-1534438327276-14e5300c3a48?auto=format&fit=crop&w=900&q=80',
-      link: '',
+      link: 'https://github.com/hamoodsamad',
     },
     {
       id: 'proj-4',
@@ -80,7 +80,7 @@
         'Artisan culinary digital menu and reservation experience crafted with warm visual storytelling and effortless navigation.',
       image:
         'https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=900&q=80',
-      link: '',
+      link: 'https://github.com/hamoodsamad',
     },
   ];
 
@@ -357,7 +357,16 @@
       safeWrite(KEYS.projects, cloned);
       return cloned;
     }
-    return stored;
+    // Ensure all stored projects have functional links populated
+    return stored.map((p) => {
+      if (p.id === 'proj-realtime-chats' && (!p.link || p.link.trim() === '')) {
+        return { ...p, link: 'https://real-time-chats-3nydg9yij-hamoodsamad0321-6526.vercel.app/' };
+      }
+      if (!p.link || p.link.trim() === '') {
+        return { ...p, link: 'https://github.com/hamoodsamad' };
+      }
+      return p;
+    });
   }
 
   function getInquiriesLocal() {

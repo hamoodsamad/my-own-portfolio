@@ -45,7 +45,13 @@ import { applyProfileHydration, ProfileHydration } from './profile.js';
 import { CarouselEngine } from './carousel.js';
 import { InquiryController } from './contact.js';
 import { SyncAndClipboard } from './sync.js';
-import { runPageIntro, initTextRecreation, PageIntro, TextRecreationEngine } from './effects.js';
+import {
+  runPageIntro,
+  initTextRecreation,
+  triggerTextRecreate,
+  PageIntro,
+  TextRecreationEngine,
+} from './effects.js';
 
 let hasBootstrapped = false;
 
@@ -107,7 +113,14 @@ export function bootstrap() {
     window.__SCROLL_OVERLAY__ = (enabled) => setDebugOverlay(enabled);
 
     window.addEventListener('scroll', onNativeScroll, { passive: true });
-    window.addEventListener('resize', onDebouncedResize, { passive: true });
+    window.addEventListener(
+      'resize',
+      () => {
+        onDebouncedResize();
+        CarouselEngine.renderProjects();
+      },
+      { passive: true },
+    );
 
     // Refresh layout cache once web fonts load to guarantee pixel-perfect section offsets
     if (document.fonts && typeof document.fonts.ready === 'object' && typeof document.fonts.ready.then === 'function') {
@@ -137,6 +150,14 @@ export function bootstrap() {
 
     // Initialize subtle GSAP scroll-triggered entrance reveals
     initScrollAnimations();
+
+    // Trigger opening hero eyebrow recreation effect once curtains part
+    setTimeout(() => {
+      const heroEyebrow = document.querySelector('.hero-eyebrow[data-recreate-text]');
+      if (heroEyebrow) {
+        triggerTextRecreate(heroEyebrow, 1300);
+      }
+    }, 520);
   }
 
   // 4. Initial cloud sync

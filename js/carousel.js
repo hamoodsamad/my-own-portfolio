@@ -247,6 +247,19 @@ import { Security } from './security.js';
       }
     }
 
+    function getResponsiveCardDimensions() {
+      const vpW = window.innerWidth;
+      if (vpW <= 480) {
+        return { cardWidth: Math.min(220, Math.round(vpW * 0.72)), cardHeight: 330, minRadius: 155 };
+      } else if (vpW <= 768) {
+        return { cardWidth: 235, cardHeight: 345, minRadius: 195 };
+      } else if (vpW <= 1024) {
+        return { cardWidth: 260, cardHeight: 365, minRadius: 235 };
+      } else {
+        return { cardWidth: 280, cardHeight: 380, minRadius: 265 };
+      }
+    }
+
     function rotateToProjectIndex(targetIdx) {
       const targetItem = carouselItems.find((item) => item.projectIndex === targetIdx);
       if (!targetItem) return;
@@ -318,15 +331,15 @@ import { Security } from './security.js';
       slotCount = slots.length;
       slotAngleStep = 360 / slotCount;
 
-      const isMobile = window.innerWidth <= 600;
-      const isTablet = window.innerWidth <= 768;
-      const cardWidth = isMobile ? 160 : isTablet ? 210 : 270;
+      const { cardWidth, cardHeight, minRadius } = getResponsiveCardDimensions();
+      carouselCylinder.style.width = `${cardWidth}px`;
+      carouselCylinder.style.height = `${cardHeight}px`;
 
       let radius = 0;
       if (slotCount >= 3) {
         const radPerSlot = Math.PI / slotCount;
         const computedR = (cardWidth / 2) / Math.tan(radPerSlot);
-        radius = Math.max(isMobile ? 130 : (isTablet ? 180 : 220), Math.round(computedR + (isMobile ? 8 : 20)));
+        radius = Math.max(minRadius, Math.round(computedR + 15));
       }
 
       slots.forEach((slot, sIdx) => {
@@ -335,6 +348,8 @@ import { Security } from './security.js';
 
         const card = document.createElement('article');
         card.className = 'carousel-card';
+        card.style.width = `${cardWidth}px`;
+        card.style.height = `${cardHeight}px`;
         card.style.transform = `rotateY(${baseAngle}deg) translateZ(${radius}px)`;
         card.style.setProperty('--card-opacity', '1');
 
@@ -345,7 +360,7 @@ import { Security } from './security.js';
         const titleText = proj.title || 'Untitled Project';
         const descText = proj.description || '';
 
-        // B5 Fix: Build card DOM with createElement & textContent (zero XSS risk, valid markup)
+        // Build card DOM with createElement & textContent (zero XSS risk, valid markup)
         const thumb = document.createElement('div');
         thumb.className = 'project-thumb';
 
@@ -394,18 +409,27 @@ import { Security } from './security.js';
         const footer = document.createElement('div');
         footer.className = 'project-footer';
 
-        if (proj.liveUrl) {
-          const liveSafe = Security.sanitizeUrl(proj.liveUrl);
-          if (liveSafe) {
-            const a = document.createElement('a');
-            a.href = liveSafe;
-            a.target = '_blank';
-            a.rel = 'noopener noreferrer';
-            a.className = 'project-link';
-            a.setAttribute('aria-label', `Visit live demo for ${titleText}`);
-            a.textContent = 'Live Demo ↗';
-            footer.appendChild(a);
-          }
+        const projectUrl = proj.link || proj.liveUrl || 'https://real-time-chats-3nydg9yij-hamoodsamad0321-6526.vercel.app/';
+        const safeUrl = Security.sanitizeUrl(projectUrl);
+
+        if (safeUrl) {
+          const viewBtn = document.createElement('a');
+          viewBtn.href = safeUrl;
+          viewBtn.target = '_blank';
+          viewBtn.rel = 'noopener noreferrer';
+          viewBtn.className = 'project-view-btn';
+          viewBtn.setAttribute('aria-label', `Open project: ${titleText}`);
+
+          const textSpan = document.createElement('span');
+          textSpan.textContent = 'View Project';
+          const arrowSpan = document.createElement('span');
+          arrowSpan.className = 'project-arrow';
+          arrowSpan.setAttribute('aria-hidden', 'true');
+          arrowSpan.textContent = '↗';
+
+          viewBtn.appendChild(textSpan);
+          viewBtn.appendChild(arrowSpan);
+          footer.appendChild(viewBtn);
         }
 
         if (proj.githubUrl) {
@@ -426,7 +450,7 @@ import { Security } from './security.js';
         card.appendChild(thumb);
         card.appendChild(body);
 
-        // B2 & B4 Fix: Card click rotates directly to clicked slot's angle; suppresses click on drag
+        // Click on background card rotates it to front; click on active front card opens project
         card.addEventListener('click', (e) => {
           if (hasDragged) {
             e.preventDefault();
@@ -439,6 +463,10 @@ import { Security } from './security.js';
           if (Math.abs(theta) > 1 && slotCount > 1) {
             targetAngle -= theta;
             if (isCarouselInView) startCarouselLoop();
+          } else {
+            if (safeUrl) {
+              window.open(safeUrl, '_blank', 'noopener,noreferrer');
+            }
           }
         }, true);
 
