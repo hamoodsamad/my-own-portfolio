@@ -655,6 +655,8 @@ button {
   -webkit-text-stroke: 0.45px rgba(255, 255, 255, 0.72);
   margin-bottom: 8px;
   text-shadow: 0 2px 22px rgba(0, 0, 0, 0.65);
+  padding-right: 0.45em;
+  overflow: visible;
 }
 
 .hero-title {
@@ -1355,6 +1357,8 @@ button {
   display: inline-block;
   max-width: 100%;
   vertical-align: top;
+  overflow: visible;
+  padding-right: 0.35em;
 }
 
 .rewrite-sizer {
@@ -1362,13 +1366,16 @@ button {
   display: block;
   user-select: none;
   pointer-events: none;
+  overflow: visible;
+  padding-right: 0.35em;
 }
 
 .rewrite-live {
   position: absolute;
   inset: 0;
   display: block;
-  overflow: hidden;
+  overflow: visible;
+  white-space: nowrap;
 }
 
 .recreate-glow {

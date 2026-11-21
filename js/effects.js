@@ -252,12 +252,28 @@ export function initTextRecreation() {
     });
   });
 
-  // Holographic Frame click and viewport trigger for full person recreation
+  // Holographic Frame click, hover, and viewport trigger for full person recreation
   const holoFrame = document.querySelector('.holo-frame');
   if (holoFrame) {
-    holoFrame.addEventListener('click', () => {
+    const triggerHoloFullRecreate = () => {
       triggerHoloGlitch(holoFrame);
-    });
+    };
+
+    holoFrame.addEventListener('mouseenter', triggerHoloFullRecreate);
+    holoFrame.addEventListener('click', triggerHoloFullRecreate);
+
+    const holoBadge = holoFrame.querySelector('.holo-badge');
+    if (holoBadge) {
+      holoBadge.style.cursor = 'pointer';
+      holoBadge.addEventListener('mouseenter', triggerHoloFullRecreate);
+      holoBadge.addEventListener('click', triggerHoloFullRecreate);
+    }
+
+    const badgeText = holoFrame.querySelector('.holo-badge-text');
+    if (badgeText) {
+      badgeText.addEventListener('mouseenter', triggerHoloFullRecreate);
+      badgeText.addEventListener('click', triggerHoloFullRecreate);
+    }
 
     if ('IntersectionObserver' in window) {
       const holoObserver = new IntersectionObserver(

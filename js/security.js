@@ -26,7 +26,14 @@ export function escapeHTML(str) {
  */
 export function sanitizeUrl(url) {
   if (!url) return '';
-  const str = String(url).trim();
+  let str = String(url).trim();
+  if (/^javascript:|^vbscript:|^data:(?!image\/)/i.test(str)) {
+    return '';
+  }
+  // Auto-prepend https:// for bare domains (e.g. real-time-chats-gamma.vercel.app or luxora-watches-azure.vercel.app)
+  if (!/^(https?:\/\/|mailto:|tel:|\/(?!\/)|\.\/|#)/i.test(str)) {
+    str = 'https://' + str;
+  }
   if (/^(https?:\/\/|mailto:|tel:|\/(?!\/)|\.\/|#)/i.test(str)) {
     return str;
   }

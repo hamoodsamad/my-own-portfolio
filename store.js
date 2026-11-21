@@ -8,8 +8,8 @@
   };
 
   const DEFAULT_SUPABASE_CONFIG = {
-    supabaseUrl: 'https://xumshyrendehegrahaqa.supabase.co',
-    supabaseKey: 'sb_publishable_zPjLotwp_0vsRRWjtzdNiA_KGXpFbrL',
+    supabaseUrl: 'https://oyizoyfhgcxvhcxlubde.supabase.co',
+    supabaseKey: 'sb_publishable_PvvPikr64Pe_n7h8fJTmNA_uJPlk7wB',
     adminEmail: 'hamoodsamad0321@gmail.com',
   };
 
@@ -463,9 +463,13 @@
           .order('created_at', { ascending: false });
 
         if (!error && Array.isArray(data)) {
-          // Always trust Supabase Cloud as the single source of truth (even when 0 rows)
-          safeWrite(KEYS.projects, data);
-          return { projects: data, engine: 'Supabase Cloud' };
+          // Normalize links with https:// so View Project buttons work seamlessly across all platforms
+          const normalized = data.map((p) => ({
+            ...p,
+            link: normalizeExternalUrl(p.link || (p.id && p.id.includes('realtime') ? 'https://real-time-chats-gamma.vercel.app' : 'https://github.com/hamoodsamad')),
+          }));
+          safeWrite(KEYS.projects, normalized);
+          return { projects: normalized, engine: 'Supabase Cloud' };
         }
       } catch {
         // Offline fallback below

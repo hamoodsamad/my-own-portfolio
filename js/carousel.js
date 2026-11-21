@@ -446,36 +446,32 @@ import { Security } from './security.js';
         const footer = document.createElement('div');
         footer.className = 'project-footer';
 
-        const projectUrl = proj.link || proj.liveUrl || 'https://real-time-chats-3nydg9yij-hamoodsamad0321-6526.vercel.app/';
-        const safeUrl = Security.sanitizeUrl(projectUrl);
+        const projectUrl = proj.link || proj.liveUrl || 'https://real-time-chats-gamma.vercel.app';
+        const safeUrl = Security.sanitizeUrl(projectUrl) || 'https://real-time-chats-gamma.vercel.app';
 
-        if (safeUrl) {
-          const viewBtn = document.createElement('a');
-          viewBtn.href = safeUrl;
-          viewBtn.target = '_blank';
-          viewBtn.rel = 'noopener noreferrer';
-          viewBtn.className = 'project-view-btn';
-          viewBtn.setAttribute('aria-label', `Open project: ${titleText}`);
+        const viewBtn = document.createElement('a');
+        viewBtn.href = safeUrl;
+        viewBtn.target = '_blank';
+        viewBtn.rel = 'noopener noreferrer';
+        viewBtn.className = 'project-view-btn';
+        viewBtn.setAttribute('aria-label', `Open project: ${titleText}`);
 
-          const textSpan = document.createElement('span');
-          textSpan.textContent = 'View Project';
-          const arrowSpan = document.createElement('span');
-          arrowSpan.className = 'project-arrow';
-          arrowSpan.setAttribute('aria-hidden', 'true');
-          arrowSpan.textContent = '↗';
+        const textSpan = document.createElement('span');
+        textSpan.textContent = 'View Project';
+        const arrowSpan = document.createElement('span');
+        arrowSpan.className = 'project-arrow';
+        arrowSpan.setAttribute('aria-hidden', 'true');
+        arrowSpan.textContent = '↗';
 
-          viewBtn.appendChild(textSpan);
-          viewBtn.appendChild(arrowSpan);
+        viewBtn.appendChild(textSpan);
+        viewBtn.appendChild(arrowSpan);
 
-          viewBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            if (safeUrl) {
-              window.open(safeUrl, '_blank', 'noopener,noreferrer');
-            }
-          });
+        viewBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          window.open(safeUrl, '_blank', 'noopener,noreferrer');
+        });
 
-          footer.appendChild(viewBtn);
-        }
+        footer.appendChild(viewBtn);
 
         if (proj.githubUrl) {
           const ghSafe = Security.sanitizeUrl(proj.githubUrl);
