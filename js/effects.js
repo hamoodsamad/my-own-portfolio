@@ -57,41 +57,58 @@ const LOWER_CHARS = 'abcdefghijklmnopqrstuvwxyz';
 const DIGIT_CHARS = '0123456789';
 
 function runTextRecreate(targetText, onFrame, durationMs = 1100) {
-  const frameStepMs = 42;
-  const totalFrames = Math.max(14, Math.round(durationMs / frameStepMs));
-  let frame = 0;
+  let animId = null;
+  const startTime = performance.now();
+  let lastScrambleTime = 0;
+  const scrambleIntervalMs = 28; // ~36 FPS glyph flicker for high-fidelity alphanumeric decryption
 
-  const timer = setInterval(() => {
-    frame += 1;
-    const progress = frame / totalFrames;
-    const revealCount = Math.floor(progress * targetText.length);
+  function tick(now) {
+    const elapsed = now - startTime;
+    const rawProgress = Math.min(1, Math.max(0, elapsed / durationMs));
+    // Butter-smooth ease-out power curve: rapid initial decrypt, fluidly settling into final letters
+    const easedProgress = Math.pow(rawProgress, 0.78);
+    const revealCount = Math.floor(easedProgress * targetText.length);
 
-    const nextText = targetText
-      .split('')
-      .map((char, idx) => {
-        if (idx < revealCount) return char;
-        if (/[A-Z]/.test(char)) {
-          return UPPER_CHARS[Math.floor(Math.random() * UPPER_CHARS.length)];
+    if (now - lastScrambleTime >= scrambleIntervalMs || rawProgress >= 1) {
+      lastScrambleTime = now;
+      const textLen = targetText.length;
+      let result = '';
+
+      for (let idx = 0; idx < textLen; idx++) {
+        const char = targetText[idx];
+        if (idx < revealCount || rawProgress >= 1) {
+          result += char;
+        } else {
+          if (/[A-Z]/.test(char)) {
+            result += UPPER_CHARS[Math.floor(Math.random() * UPPER_CHARS.length)];
+          } else if (/[a-z]/.test(char)) {
+            result += LOWER_CHARS[Math.floor(Math.random() * LOWER_CHARS.length)];
+          } else if (/[0-9]/.test(char)) {
+            result += DIGIT_CHARS[Math.floor(Math.random() * DIGIT_CHARS.length)];
+          } else {
+            result += char;
+          }
         }
-        if (/[a-z]/.test(char)) {
-          return LOWER_CHARS[Math.floor(Math.random() * LOWER_CHARS.length)];
-        }
-        if (/[0-9]/.test(char)) {
-          return DIGIT_CHARS[Math.floor(Math.random() * DIGIT_CHARS.length)];
-        }
-        return char;
-      })
-      .join('');
-
-    onFrame(nextText);
-
-    if (frame >= totalFrames) {
-      clearInterval(timer);
-      onFrame(targetText);
+      }
+      onFrame(result);
     }
-  }, frameStepMs);
 
-  return () => clearInterval(timer);
+    if (rawProgress < 1) {
+      animId = requestAnimationFrame(tick);
+    } else {
+      onFrame(targetText);
+      animId = null;
+    }
+  }
+
+  animId = requestAnimationFrame(tick);
+
+  return () => {
+    if (animId !== null) {
+      cancelAnimationFrame(animId);
+      animId = null;
+    }
+  };
 }
 
 function restartClass(node, className) {
@@ -170,13 +187,17 @@ function setupRecreateTextEl(el) {
 }
 
 /**
- * Triggers futuristic hologram glitch/scanline animation on the robot portrait
+ * Triggers futuristic hologram glitch/scanline and full character reconstruction on the portrait
  */
 export function triggerHoloGlitch(holoFrame) {
   if (!holoFrame) return;
+  restartClass(holoFrame, 'is-reconstructing');
   restartClass(holoFrame, 'is-glitching');
   const wipe = holoFrame.querySelector('[data-recreate-wipe]');
   if (wipe) restartClass(wipe, 'recreate-wipe');
+  holoFrame.querySelectorAll('[data-recreate-text]').forEach((el) => {
+    triggerTextRecreate(el, 1100);
+  });
 }
 
 export function initTextRecreation() {
@@ -193,7 +214,16 @@ export function initTextRecreation() {
     });
   });
 
-  // Hover triggers for cards containing recreate text or wipe elements
+  // Hero eyebrow click trigger for "Hey, I'm Hamood Samad"
+  const heroEyebrow = document.querySelector('.hero-eyebrow[data-recreate-text]');
+  if (heroEyebrow) {
+    heroEyebrow.style.cursor = 'pointer';
+    heroEyebrow.addEventListener('click', () => {
+      triggerTextRecreate(heroEyebrow, 1200);
+    });
+  }
+
+  // Hover and click triggers for cards containing recreate text or wipe elements
   document.querySelectorAll('[data-recreate-card]').forEach((card) => {
     card.addEventListener('mouseenter', () => {
       card.querySelectorAll('[data-recreate-text]').forEach((el) => {
@@ -222,24 +252,27 @@ export function initTextRecreation() {
     });
   });
 
-  // Holographic Frame trigger on view
+  // Holographic Frame click and viewport trigger for full person recreation
   const holoFrame = document.querySelector('.holo-frame');
-  if (holoFrame && 'IntersectionObserver' in window) {
-    const holoObserver = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting) {
-            triggerHoloGlitch(holoFrame);
-            holoFrame.querySelectorAll('[data-recreate-text]').forEach((el) => {
-              triggerTextRecreate(el);
-            });
-            holoObserver.unobserve(holoFrame);
-          }
-        });
-      },
-      { threshold: 0.35 }
-    );
-    holoObserver.observe(holoFrame);
+  if (holoFrame) {
+    holoFrame.addEventListener('click', () => {
+      triggerHoloGlitch(holoFrame);
+    });
+
+    if ('IntersectionObserver' in window) {
+      const holoObserver = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) {
+              triggerHoloGlitch(holoFrame);
+              holoObserver.unobserve(holoFrame);
+            }
+          });
+        },
+        { threshold: 0.35 }
+      );
+      holoObserver.observe(holoFrame);
+    }
   }
 }
 

@@ -927,6 +927,8 @@ button {
   background: radial-gradient(circle at 50% 45%, rgba(255, 87, 25, 0.14) 0%, rgba(16, 8, 22, 0.88) 58%, rgba(5, 3, 8, 0.96) 100%);
   border: 1px solid rgba(255, 87, 25, 0.28);
   box-shadow: 0 24px 56px rgba(0, 0, 0, 0.52), 0 0 38px -12px rgba(255, 87, 25, 0.3);
+  cursor: pointer;
+  user-select: none;
 }
 
 .holo-img {
@@ -943,37 +945,75 @@ button {
   transform: scale(1.03);
 }
 
-@keyframes holoGlitch {
+/* Full Cybernetic / Holographic Person Materialization & Recreation */
+@keyframes holoReconstructPerson {
   0% {
-    filter: contrast(1.1) saturate(1.1) brightness(1);
-    transform: scale(1);
+    opacity: 0.15;
+    filter: contrast(2.4) brightness(2.2) hue-rotate(180deg) saturate(3) drop-shadow(0 0 30px rgba(255, 87, 25, 0.95));
+    clip-path: polygon(0 0, 100% 0, 100% 0%, 0 0%);
+    transform: scale(0.96) skewX(2.5deg);
   }
-  20% {
-    filter: contrast(1.4) saturate(1.6) brightness(1.25) hue-rotate(15deg);
-    transform: scale(1.02) skewX(1.5deg);
+  15% {
+    opacity: 0.45;
+    filter: contrast(2.0) brightness(1.85) hue-rotate(120deg) saturate(2.5) drop-shadow(0 0 40px rgba(255, 120, 60, 0.85));
+    clip-path: polygon(0 0, 100% 0, 100% 28%, 0 24%);
+    transform: scale(1.03) skewX(-2.5deg);
   }
-  40% {
-    filter: contrast(1.7) saturate(2.0) brightness(1.4) drop-shadow(0 0 14px rgba(255, 87, 25, 0.7));
-    transform: scale(1.03) skewX(-1.5deg);
+  35% {
+    opacity: 0.72;
+    filter: contrast(1.75) brightness(1.5) hue-rotate(60deg) saturate(2) drop-shadow(0 0 26px rgba(255, 87, 25, 0.7));
+    clip-path: polygon(0 0, 100% 0, 100% 58%, 0 55%);
+    transform: scale(1.015) skewX(1.5deg);
   }
   60% {
-    filter: contrast(1.2) saturate(1.3) brightness(1.1);
-    transform: scale(1.01) skewX(0.5deg);
+    opacity: 0.88;
+    filter: contrast(1.4) brightness(1.25) hue-rotate(20deg) saturate(1.4);
+    clip-path: polygon(0 0, 100% 0, 100% 88%, 0 85%);
+    transform: scale(1.02) skewX(-0.5deg);
+  }
+  85% {
+    opacity: 0.96;
+    filter: contrast(1.15) brightness(1.1) hue-rotate(0deg) saturate(1.15);
+    clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%);
+    transform: scale(1.035) skewX(0deg);
   }
   100% {
+    opacity: 1;
     filter: contrast(1.06) saturate(1.08) brightness(1);
+    clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%);
     transform: scale(1.03);
   }
 }
 
-.holo-frame.is-glitching .holo-img,
-.holo-frame:hover .holo-img {
-  animation: holoGlitch 0.85s cubic-bezier(0.16, 1, 0.3, 1);
+@keyframes holoLaserBeam {
+  0% {
+    top: -15%;
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+    box-shadow: 0 0 25px rgba(255, 87, 25, 1), 0 0 50px rgba(255, 120, 40, 0.85);
+  }
+  82% {
+    opacity: 1;
+    box-shadow: 0 0 25px rgba(255, 87, 25, 1), 0 0 50px rgba(255, 120, 40, 0.85);
+  }
+  100% {
+    top: 108%;
+    opacity: 0;
+  }
 }
 
+.holo-frame.is-reconstructing .holo-img,
+.holo-frame.is-glitching .holo-img,
+.holo-frame:hover .holo-img {
+  animation: holoReconstructPerson 1.05s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.holo-frame.is-reconstructing .holo-scanline,
 .holo-frame.is-glitching .holo-scanline,
 .holo-frame:hover .holo-scanline {
-  animation: holoScan 1.2s ease-out;
+  animation: holoLaserBeam 1.05s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 .holo-scanline {
@@ -1073,10 +1113,14 @@ button {
 }
 
 .about-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-  max-width: 540px;
+  display: inline-flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: clamp(8px, 1.2vw, 14px);
+  width: auto;
+  max-width: 100%;
 }
 
 .metric {
@@ -1086,7 +1130,8 @@ button {
 }
 
 .metric-card {
-  padding: 11px 14px;
+  flex: 0 0 auto;
+  padding: 8px 14px;
   border-radius: 12px;
   background: var(--glass-bg);
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -1102,7 +1147,19 @@ button {
 }
 
 .metric strong {
-  font-size: clamp(1rem, 1.3vw, 1.2rem);
+  font-size: clamp(1rem, 1.4vw, 1.28rem);
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.metric span {
+  font-size: clamp(0.64rem, 0.9vw, 0.74rem);
+  color: var(--text-secondary);
+  font-weight: 600;
+  white-space: nowrap;
+}
   font-weight: 800;
   color: var(--accent);
   letter-spacing: -0.02em;
@@ -1533,10 +1590,10 @@ button {
 
 .carousel-stage {
   position: relative;
-  width: 100%;
-  max-width: 1100px;
-  height: 540px;
-  perspective: 1300px;
+  width: calc(100% - clamp(90px, 12vw, 130px));
+  max-width: 860px;
+  height: 520px;
+  perspective: 1200px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1544,6 +1601,7 @@ button {
   user-select: none;
   touch-action: pan-y;
   cursor: grab;
+  margin-inline: auto;
 }
 
 .carousel-stage.is-dragging {
@@ -1734,58 +1792,60 @@ button {
   color: var(--text-muted);
 }
 
-.carousel-footer {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 14px;
-  margin-top: 22px;
-  position: relative;
-  z-index: 25;
-}
-
-.carousel-controls-bar {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 18px;
-  padding: 6px 16px;
-  border-radius: 999px;
-  background: rgba(16, 12, 24, 0.82);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  backdrop-filter: blur(16px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-}
-
 .carousel-nav-btn {
-  position: static;
-  transform: none;
-  width: 38px;
-  height: 38px;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 40;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(18, 14, 26, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.22);
   color: #ffffff;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow: none;
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(12px);
   flex-shrink: 0;
 }
 
+.carousel-nav-btn--prev {
+  left: clamp(8px, 2.5vw, 24px);
+}
+
+.carousel-nav-btn--next {
+  right: clamp(8px, 2.5vw, 24px);
+}
+
 .carousel-nav-btn svg {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
 }
 
 .carousel-nav-btn:hover {
   background: var(--accent);
   border-color: var(--accent);
-  transform: scale(1.08);
-  box-shadow: 0 6px 20px rgba(255, 87, 25, 0.45);
+  transform: translateY(-50%) scale(1.1);
+  box-shadow: 0 8px 24px rgba(255, 87, 25, 0.55);
+}
+
+.carousel-nav-btn:active {
+  transform: translateY(-50%) scale(0.96);
+}
+
+.carousel-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 18px;
+  position: relative;
+  z-index: 25;
 }
 
 .carousel-dots {
@@ -2508,6 +2568,7 @@ a.contact-card:hover {
   }
 
   .carousel-stage {
+    width: calc(100% - 76px);
     height: 450px;
     margin-block: 8px 14px;
     perspective: 800px;
@@ -2532,23 +2593,50 @@ a.contact-card:hover {
     font-size: 0.70rem;
   }
 
-  .carousel-controls-bar {
-    gap: 12px;
-    padding: 5px 12px;
+  .carousel-nav-btn {
+    width: 36px;
+    height: 36px;
   }
 
-  .carousel-nav-btn {
-    width: 34px;
-    height: 34px;
+  .carousel-nav-btn--prev {
+    left: 4px;
   }
-}
+
+  .carousel-nav-btn--next {
+    right: 4px;
+  }
 
   .services-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .about-metrics {
-    grid-template-columns: minmax(0, 1fr);
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 8px;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+
+  .about-metrics::-webkit-scrollbar {
+    display: none;
+  }
+
+  .metric-card {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+  }
+
+  .metric strong {
+    font-size: 1.05rem;
+  }
+
+  .metric span {
+    font-size: 0.62rem;
   }
 }
 

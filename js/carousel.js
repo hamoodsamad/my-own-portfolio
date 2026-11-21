@@ -84,6 +84,12 @@ import { Security } from './security.js';
           activeCategory = cat;
           catBtnLabel.textContent = formatCategoryTitle(cat);
           closeCategoryMenu();
+          currentAngle = 0;
+          targetAngle = 0;
+          lastClosestIndex = -1;
+          if (carouselCylinder) {
+            carouselCylinder.style.transform = 'rotateY(0deg)';
+          }
           renderProjects();
         });
 
@@ -106,6 +112,25 @@ import { Security } from './security.js';
 
     function updateCarouselPhysics(timestamp) {
       if (isScrollSuspended || !isCarouselInView || !carouselCylinder || carouselItems.length === 0) {
+        carouselRaf = null;
+        lastCarouselTime = 0;
+        return;
+      }
+
+      // If category contains only 1 project, keep it fixed front-and-center (0deg) with full visibility
+      if (slotCount <= 1) {
+        currentAngle = 0;
+        targetAngle = 0;
+        carouselCylinder.style.transform = 'rotateY(0deg)';
+        if (carouselItems[0]) {
+          const item = carouselItems[0];
+          item.el.style.transform = 'rotateY(0deg) translateZ(0px)';
+          item.el.style.visibility = 'visible';
+          item.el.style.pointerEvents = 'auto';
+          item.el.classList.add('is-active');
+          item.el.style.opacity = '1';
+          item.el.style.setProperty('--card-opacity', '1');
+        }
         carouselRaf = null;
         lastCarouselTime = 0;
         return;
@@ -299,6 +324,11 @@ import { Security } from './security.js';
       carouselItems = [];
       // B3 Fix: Reset lastClosestIndex on project/category change to keep dots synchronized
       lastClosestIndex = -1;
+      currentAngle = 0;
+      targetAngle = 0;
+      if (carouselCylinder) {
+        carouselCylinder.style.transform = 'rotateY(0deg)';
+      }
 
       if (!visible || visible.length === 0) {
         const emptyMsg = document.createElement('div');
@@ -347,11 +377,18 @@ import { Security } from './security.js';
         const proj = slot.project || {};
 
         const card = document.createElement('article');
-        card.className = 'carousel-card';
+        card.className = `carousel-card${slotCount <= 1 ? ' is-active' : ''}`;
         card.style.width = `${cardWidth}px`;
         card.style.height = `${cardHeight}px`;
-        card.style.transform = `rotateY(${baseAngle}deg) translateZ(${radius}px)`;
+        card.style.transform = slotCount <= 1
+          ? 'rotateY(0deg) translateZ(0px)'
+          : `rotateY(${baseAngle}deg) translateZ(${radius}px)`;
         card.style.setProperty('--card-opacity', '1');
+        card.style.opacity = '1';
+        card.style.visibility = 'visible';
+        if (slotCount <= 1) {
+          card.style.pointerEvents = 'auto';
+        }
 
         const imgSrc = Security.sanitizeImageUrl(proj.image);
         const imgAlt = proj.title || 'Project preview';
@@ -429,6 +466,14 @@ import { Security } from './security.js';
 
           viewBtn.appendChild(textSpan);
           viewBtn.appendChild(arrowSpan);
+
+          viewBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (safeUrl) {
+              window.open(safeUrl, '_blank', 'noopener,noreferrer');
+            }
+          });
+
           footer.appendChild(viewBtn);
         }
 
@@ -571,6 +616,7 @@ import { Security } from './security.js';
 
         carouselStage.addEventListener('pointerdown', (e) => {
           if (slotCount <= 1) return;
+          if (e.target.closest('a') || e.target.closest('button')) return;
           isDragging = true;
           hasDragged = false;
           activePointerId = e.pointerId;

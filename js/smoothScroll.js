@@ -129,7 +129,7 @@ export function initScrollAnimations() {
     });
   });
 
-  // 2. About section HUD card & Hologram portrait entrance
+  // 2. About section HUD card, Hologram portrait & Metrics entrance
   const aboutCard = document.querySelector('.about-hud-card');
   const holoFrame = document.querySelector('.holo-frame');
   if (aboutCard) {
@@ -156,6 +156,39 @@ export function initScrollAnimations() {
       scale: 0.95,
       duration: 1.0,
       ease: 'power3.out',
+    });
+  }
+
+  const metricCards = document.querySelectorAll('.about-metrics .metric-card');
+  if (metricCards.length > 0) {
+    gsap.from(metricCards, {
+      scrollTrigger: {
+        trigger: '.about-metrics',
+        start: 'top 88%',
+        once: true,
+      },
+      opacity: 0,
+      scale: 0.92,
+      y: 20,
+      duration: 0.75,
+      stagger: 0.12,
+      ease: 'power2.out',
+    });
+  }
+
+  const pillarCards = document.querySelectorAll('.about-pillar-card');
+  if (pillarCards.length > 0) {
+    gsap.from(pillarCards, {
+      scrollTrigger: {
+        trigger: '.about-pillars',
+        start: 'top 88%',
+        once: true,
+      },
+      opacity: 0,
+      y: 26,
+      duration: 0.8,
+      stagger: 0.15,
+      ease: 'power2.out',
     });
   }
 
@@ -195,7 +228,24 @@ export function initScrollAnimations() {
     });
   }
 
-  // 4. Services cards staggered reveal
+  // 4. Projects 3D carousel container entrance
+  const carouselContainer = document.getElementById('projects-carousel-container');
+  if (carouselContainer) {
+    gsap.from(carouselContainer, {
+      scrollTrigger: {
+        trigger: carouselContainer,
+        start: 'top 86%',
+        once: true,
+      },
+      opacity: 0,
+      scale: 0.94,
+      y: 32,
+      duration: 0.95,
+      ease: 'power3.out',
+    });
+  }
+
+  // 5. Services cards staggered reveal
   const expCards = document.querySelectorAll('.exp-card');
   if (expCards.length > 0) {
     gsap.from(expCards, {
@@ -212,7 +262,7 @@ export function initScrollAnimations() {
     });
   }
 
-  // 5. Contact right card stack reveal
+  // 6. Contact right card stack reveal
   const contactRight = document.querySelector('.contact-right');
   if (contactRight) {
     gsap.from(contactRight, {
