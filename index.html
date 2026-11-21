@@ -371,27 +371,27 @@
 
         <!-- 3D Revolving Circular Carousel Track -->
         <div class="carousel-container" id="projects-carousel-container">
-          <button type="button" class="carousel-nav-btn carousel-nav-btn--prev" id="carousel-prev-btn" aria-label="Previous project">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
-            </svg>
-          </button>
-
-          <div class="carousel-stage" id="carousel-stage">
+          <div class="carousel-stage" id="carousel-stage" aria-label="Projects 3D revolving carousel" tabindex="0">
             <div class="carousel-cylinder" id="carousel-cylinder">
               <!-- Dynamic 3D cards injected here -->
             </div>
           </div>
-
-          <button type="button" class="carousel-nav-btn carousel-nav-btn--next" id="carousel-next-btn" aria-label="Next project">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
-            </svg>
-          </button>
         </div>
 
         <div class="carousel-footer">
-          <div class="carousel-dots" id="carousel-dots" role="tablist" aria-label="Project carousel indicators"></div>
+          <div class="carousel-controls-bar" aria-label="Carousel navigation">
+            <button type="button" class="carousel-nav-btn carousel-nav-btn--prev" id="carousel-prev-btn" aria-label="Previous project">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+            <div class="carousel-dots" id="carousel-dots" role="tablist" aria-label="Project carousel indicators"></div>
+            <button type="button" class="carousel-nav-btn carousel-nav-btn--next" id="carousel-next-btn" aria-label="Next project">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+          </div>
           <p class="carousel-drag-hint">
             <span class="drag-icon" aria-hidden="true">⇄</span>
             <span>Drag or swipe horizontally to revolve projects in 360°</span>

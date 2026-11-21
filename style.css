@@ -1527,15 +1527,16 @@ button {
   justify-content: center;
   margin-top: clamp(16px, 2.5vh, 28px);
   padding-inline: clamp(10px, 3vw, 40px);
-  overflow: hidden;
+  overflow-y: visible;
+  overflow-x: clip;
 }
 
 .carousel-stage {
   position: relative;
   width: 100%;
   max-width: 1100px;
-  height: 420px;
-  perspective: 1250px;
+  height: 540px;
+  perspective: 1300px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1733,24 +1734,46 @@ button {
   color: var(--text-muted);
 }
 
-.carousel-nav-btn {
-  position: absolute;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 42px;
-  height: 42px;
-  border-radius: 50%;
-  background: rgba(16, 12, 24, 0.85);
-  border: 1px solid rgba(255, 255, 255, 0.16);
+.carousel-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 22px;
+  position: relative;
+  z-index: 25;
+}
+
+.carousel-controls-bar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 6px 16px;
+  border-radius: 999px;
+  background: rgba(16, 12, 24, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   backdrop-filter: blur(16px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.carousel-nav-btn {
+  position: static;
+  transform: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
   color: #ffffff;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  z-index: 30;
-  transition: all 0.2s ease;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: none;
+  flex-shrink: 0;
 }
 
 .carousel-nav-btn svg {
@@ -1758,28 +1781,11 @@ button {
   height: 18px;
 }
 
-.carousel-nav-btn--prev {
-  left: clamp(4px, 1.5vw, 20px);
-}
-
-.carousel-nav-btn--next {
-  right: clamp(4px, 1.5vw, 20px);
-}
-
 .carousel-nav-btn:hover {
   background: var(--accent);
   border-color: var(--accent);
-  transform: translateY(-50%) scale(1.08);
-  box-shadow: 0 10px 28px rgba(255, 87, 25, 0.4);
-}
-
-.carousel-footer {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  margin-top: 18px;
+  transform: scale(1.08);
+  box-shadow: 0 6px 20px rgba(255, 87, 25, 0.45);
 }
 
 .carousel-dots {
@@ -2489,15 +2495,22 @@ a.contact-card:hover {
   }
 }
 
+@media (max-width: 1024px) {
+  .carousel-stage {
+    height: 490px;
+    perspective: 1100px;
+  }
+}
+
 @media (max-width: 600px) {
   .projects {
     padding-block: clamp(44px, 8vh, 76px);
   }
 
   .carousel-stage {
-    height: 355px;
-    margin-block: 8px 12px;
-    perspective: 750px;
+    height: 450px;
+    margin-block: 8px 14px;
+    perspective: 800px;
   }
 
   .carousel-card .project-body {
@@ -2519,18 +2532,16 @@ a.contact-card:hover {
     font-size: 0.70rem;
   }
 
+  .carousel-controls-bar {
+    gap: 12px;
+    padding: 5px 12px;
+  }
+
   .carousel-nav-btn {
-    width: 36px;
-    height: 36px;
+    width: 34px;
+    height: 34px;
   }
-
-  .carousel-nav-btn--prev {
-    left: 2px;
-  }
-
-  .carousel-nav-btn--next {
-    right: 2px;
-  }
+}
 
   .services-grid {
     grid-template-columns: minmax(0, 1fr);
