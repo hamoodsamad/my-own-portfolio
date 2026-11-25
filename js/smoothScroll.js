@@ -136,104 +136,92 @@ export function initScrollAnimations() {
 
   const gsap = window.gsap;
 
+  /**
+   * Helper: Temporarily suspends CSS transitions on cards during GSAP transform tweens
+   * so CSS `transition: transform` never clashes with or freezes GSAP `from` transforms,
+   * and clears all inline styles after reveal so CSS hover effects work normally.
+   */
+  const revealCards = (targets, triggerEl, options = {}) => {
+    const els = gsap.utils.toArray(targets);
+    if (!els.length) return;
+    gsap.from(els, {
+      scrollTrigger: {
+        trigger: triggerEl || els[0],
+        start: options.start || 'top 90%',
+        once: true,
+      },
+      opacity: 0,
+      y: options.y ?? 22,
+      scale: options.scale ?? 1,
+      duration: options.duration ?? 0.72,
+      stagger: options.stagger ?? 0,
+      ease: options.ease || 'power2.out',
+      clearProps: 'transform,opacity,translate,rotate,scale,transition',
+      onStart: () => {
+        els.forEach((el) => {
+          el.style.transition = 'none';
+        });
+      },
+    });
+  };
+
   // 1. Subtle upward fade-in for section headers
   const headers = document.querySelectorAll('.about-title, .skills-head, .projects-head, .services-head, .contact-left');
   headers.forEach((el) => {
     gsap.from(el, {
       scrollTrigger: {
         trigger: el,
-        start: 'top 88%',
+        start: 'top 90%',
         toggleActions: 'play none none none',
         once: true,
       },
       opacity: 0,
-      y: 28,
-      duration: 0.85,
+      y: 24,
+      duration: 0.8,
       ease: 'power2.out',
+      clearProps: 'transform,opacity',
     });
   });
 
-  // 2. About section HUD card, Hologram portrait & Metrics entrance
+  // 2. About section HUD card, Hologram core & Metrics entrance
   const aboutCard = document.querySelector('.about-hud-card');
   const visualCol = document.querySelector('.about-visual-col');
   if (aboutCard) {
-    gsap.from(aboutCard, {
-      scrollTrigger: {
-        trigger: aboutCard,
-        start: 'top 85%',
-        once: true,
-      },
-      opacity: 0,
-      y: 32,
-      duration: 0.95,
-      ease: 'power3.out',
-    });
+    revealCards(aboutCard, aboutCard, { y: 26, duration: 0.85, ease: 'power3.out' });
   }
   if (visualCol) {
-    gsap.from(visualCol, {
-      scrollTrigger: {
-        trigger: visualCol,
-        start: 'top 85%',
-        once: true,
-      },
-      opacity: 0,
-      scale: 0.95,
-      duration: 1.0,
-      ease: 'power3.out',
-    });
+    revealCards(visualCol, visualCol, { y: 20, scale: 0.96, duration: 0.9, ease: 'power3.out' });
   }
 
+  const aboutMetrics = document.querySelector('.about-metrics');
   const metricCards = document.querySelectorAll('.about-metrics .metric-card');
-  if (metricCards.length > 0) {
+  if (aboutMetrics && metricCards.length > 0) {
+    // Animate opacity cleanly with zero downward shift conflict on the metric pills
     gsap.from(metricCards, {
       scrollTrigger: {
-        trigger: '.about-metrics',
-        start: 'top 88%',
+        trigger: aboutMetrics,
+        start: 'top 92%',
         once: true,
       },
       opacity: 0,
-      scale: 0.92,
-      y: 20,
-      duration: 0.75,
-      stagger: 0.12,
+      duration: 0.65,
+      stagger: 0.1,
       ease: 'power2.out',
+      clearProps: 'opacity,transform',
     });
   }
 
   const pillarCards = document.querySelectorAll('.about-pillar-card');
   if (pillarCards.length > 0) {
-    gsap.from(pillarCards, {
-      scrollTrigger: {
-        trigger: '.about-pillars',
-        start: 'top 88%',
-        once: true,
-      },
-      opacity: 0,
-      y: 26,
-      duration: 0.8,
-      stagger: 0.15,
-      ease: 'power2.out',
-    });
+    revealCards(pillarCards, '.about-pillars', { y: 22, stagger: 0.12 });
   }
 
   // 3. Technical Skills cards and animated skill progress bars
   const skillItems = document.querySelectorAll('.skill-item');
   if (skillItems.length > 0) {
-    gsap.from(skillItems, {
-      scrollTrigger: {
-        trigger: '.skills-strip',
-        start: 'top 85%',
-        once: true,
-      },
-      opacity: 0,
-      y: 22,
-      duration: 0.7,
-      stagger: 0.08,
-      ease: 'power2.out',
-    });
+    revealCards(skillItems, '.skills-strip', { y: 20, stagger: 0.08, duration: 0.68 });
 
     document.querySelectorAll('.skill-bar span').forEach((bar) => {
-      // Save target width class or style
       const computedW = window.getComputedStyle(bar).width;
       gsap.fromTo(
         bar,
@@ -241,12 +229,13 @@ export function initScrollAnimations() {
         {
           scrollTrigger: {
             trigger: bar,
-            start: 'top 92%',
+            start: 'top 94%',
             once: true,
           },
           width: computedW,
-          duration: 1.1,
+          duration: 1.05,
           ease: 'power2.out',
+          clearProps: 'width',
         }
       );
     });
@@ -255,97 +244,67 @@ export function initScrollAnimations() {
   // 4. Projects 3D carousel container entrance
   const carouselContainer = document.getElementById('projects-carousel-container');
   if (carouselContainer) {
-    gsap.from(carouselContainer, {
-      scrollTrigger: {
-        trigger: carouselContainer,
-        start: 'top 86%',
-        once: true,
-      },
-      opacity: 0,
-      scale: 0.94,
-      y: 32,
-      duration: 0.95,
-      ease: 'power3.out',
-    });
+    revealCards(carouselContainer, carouselContainer, { y: 26, scale: 0.96, duration: 0.85, ease: 'power3.out' });
   }
 
   // 5. Services cards staggered reveal
   const expCards = document.querySelectorAll('.exp-card');
   if (expCards.length > 0) {
-    gsap.from(expCards, {
-      scrollTrigger: {
-        trigger: expCards[0],
-        start: 'top 86%',
-        once: true,
-      },
-      opacity: 0,
-      y: 28,
-      duration: 0.75,
-      stagger: 0.1,
-      ease: 'power2.out',
-    });
+    revealCards(expCards, expCards[0], { y: 24, stagger: 0.09, duration: 0.72 });
   }
 
   // 6. Contact right card stack reveal
   const contactRight = document.querySelector('.contact-right');
   if (contactRight) {
-    gsap.from(contactRight, {
-      scrollTrigger: {
-        trigger: contactRight,
-        start: 'top 86%',
-        once: true,
-      },
-      opacity: 0,
-      y: 28,
-      duration: 0.85,
-      ease: 'power2.out',
-    });
+    revealCards(contactRight, contactRight, { y: 24, duration: 0.8 });
   }
 
-  // 7. Multi-Plane Cinematic Scroll Parallax for About & Visual Core
-  const aboutSection = document.getElementById('about');
-  if (aboutSection) {
-    if (visualCol) {
-      gsap.to(visualCol, {
+  // 7. Multi-Plane Cinematic Scroll Parallax (Desktop Side-by-Side Only to Prevent Stacked Mobile Overlap)
+  const mm = gsap.matchMedia();
+  mm.add('(min-width: 901px)', () => {
+    const aboutSection = document.getElementById('about');
+    if (aboutSection) {
+      if (visualCol) {
+        gsap.to(visualCol, {
+          scrollTrigger: {
+            trigger: aboutSection,
+            start: 'top bottom',
+            end: 'bottom top',
+            scrub: 1.15,
+          },
+          y: -26,
+          ease: 'none',
+        });
+      }
+
+      if (aboutCard) {
+        gsap.to(aboutCard, {
+          scrollTrigger: {
+            trigger: aboutSection,
+            start: 'top bottom',
+            end: 'bottom top',
+            scrub: 0.95,
+          },
+          y: 14,
+          ease: 'none',
+        });
+      }
+    }
+
+    const projectsSection = document.getElementById('projects');
+    if (projectsSection && carouselContainer) {
+      gsap.to(carouselContainer, {
         scrollTrigger: {
-          trigger: aboutSection,
+          trigger: projectsSection,
           start: 'top bottom',
           end: 'bottom top',
-          scrub: 1.15,
+          scrub: 1.0,
         },
-        y: -30,
+        y: -18,
         ease: 'none',
       });
     }
-
-    if (aboutCard) {
-      gsap.to(aboutCard, {
-        scrollTrigger: {
-          trigger: aboutSection,
-          start: 'top bottom',
-          end: 'bottom top',
-          scrub: 0.95,
-        },
-        y: 16,
-        ease: 'none',
-      });
-    }
-  }
-
-  // 8. Projects Carousel Parallax Gliding Scrub
-  const projectsSection = document.getElementById('projects');
-  if (projectsSection && carouselContainer) {
-    gsap.to(carouselContainer, {
-      scrollTrigger: {
-        trigger: projectsSection,
-        start: 'top bottom',
-        end: 'bottom top',
-        scrub: 1.0,
-      },
-      y: -22,
-      ease: 'none',
-    });
-  }
+  });
 
   // Initial calculation refresh for all ScrollTriggers
   if (window.ScrollTrigger) {

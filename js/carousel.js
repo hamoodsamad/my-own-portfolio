@@ -273,11 +273,16 @@ import { Security } from './security.js';
     }
 
     function getResponsiveCardDimensions() {
-      const vpW = window.innerWidth;
-      if (vpW <= 480) {
-        return { cardWidth: Math.min(220, Math.round(vpW * 0.72)), cardHeight: 330, minRadius: 155 };
+      const docW = document.documentElement ? document.documentElement.clientWidth : window.innerWidth;
+      const vpW = Math.min(window.innerWidth, docW || window.innerWidth);
+      if (vpW <= 600) {
+        // Reserve comfortable space for 32px side nav arrows + sway margin under 1050px perspective (~1.16x)
+        const safeProjectedW = Math.min(234, Math.max(176, vpW - 134));
+        const cardWidth = Math.min(200, Math.max(152, Math.round(safeProjectedW / 1.16)));
+        const cardHeight = Math.round(cardWidth * 1.56);
+        return { cardWidth, cardHeight, minRadius: 118 };
       } else if (vpW <= 768) {
-        return { cardWidth: 235, cardHeight: 345, minRadius: 195 };
+        return { cardWidth: 230, cardHeight: 342, minRadius: 185 };
       } else if (vpW <= 1024) {
         return { cardWidth: 260, cardHeight: 365, minRadius: 235 };
       } else {

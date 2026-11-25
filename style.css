@@ -299,7 +299,9 @@ button {
 
 .site-header.is-scrolled {
   padding-block: 12px;
-  background-color: rgba(8, 8, 12, 0.88);
+  background-color: rgba(8, 8, 12, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border-bottom-color: rgba(255, 255, 255, 0.1);
 }
 
@@ -489,7 +491,9 @@ button {
 .mobile-menu {
   margin-top: 12px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(10, 10, 14, 0.96);
+  background: rgba(8, 7, 13, 0.97);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
 }
 
 .mobile-menu-inner {
@@ -2130,48 +2134,12 @@ button {
   color: #22c55e !important;
 }
 
-@media (max-width: 768px) {
-  .carousel-stage {
-    height: 330px;
-    perspective: 900px;
-  }
-
-  .carousel-cylinder {
-    width: 210px;
-    height: 290px;
-  }
-
-  .carousel-card {
-    width: 210px;
-    height: 290px;
-  }
-
-  .carousel-card .project-body {
-    padding: 10px 12px;
-  }
-}
-
 @media (max-width: 600px) {
-  .carousel-stage {
-    height: 255px;
-    perspective: 680px;
-  }
-
-  .carousel-cylinder {
-    width: 160px;
-    height: 228px;
-  }
-
-  .carousel-card {
-    width: 160px;
-    height: 228px;
-    border-radius: 13px;
-  }
-
   .carousel-card .project-thumb {
     aspect-ratio: 16 / 10;
-    height: 94px;
+    height: auto;
     width: 100%;
+    flex-shrink: 0;
     overflow: hidden;
   }
 
@@ -2180,64 +2148,30 @@ button {
     height: 100%;
     object-fit: contain !important;
     object-position: center;
-    padding: 3px;
+    padding: 4px;
   }
 
   .carousel-card .project-badge {
-    top: 5px;
-    left: 5px;
-    max-width: calc(100% - 44px);
+    top: 8px;
+    left: 8px;
+    max-width: calc(100% - 48px);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 0.50rem;
-    padding: 2px 5px;
+    font-size: 0.56rem;
+    padding: 3px 7px;
   }
 
   .carousel-card .project-index {
-    top: 5px;
-    right: 5px;
-    font-size: 0.52rem;
-    padding: 2px 5px;
-  }
-
-  .carousel-card .project-body {
-    padding: 6px 7px 7px 7px;
-    gap: 3px;
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-  }
-
-  .carousel-card .project-title {
-    font-size: 0.72rem;
-    line-height: 1.2;
-    font-weight: 700;
-  }
-
-  .carousel-card .project-desc {
-    font-size: 0.60rem;
-    line-height: 1.3;
-    -webkit-line-clamp: 2;
+    top: 8px;
+    right: 8px;
+    font-size: 0.6rem;
+    padding: 2px 6px;
   }
 
   .carousel-card .project-footer {
-    padding-top: 2px;
+    padding-top: 4px;
     margin-top: auto;
-  }
-
-  .carousel-card .project-link {
-    font-size: 0.64rem;
-  }
-
-  .carousel-nav-btn {
-    width: 28px;
-    height: 28px;
-  }
-
-  .carousel-nav-btn svg {
-    width: 14px;
-    height: 14px;
   }
 
   .category-menu {
@@ -2747,6 +2681,13 @@ a.contact-card:hover {
   }
 }
 
+@media (max-width: 1024px) {
+  .carousel-stage {
+    height: 490px;
+    perspective: 1100px;
+  }
+}
+
 @media (max-width: 720px) {
   .hero {
     min-height: auto;
@@ -2754,16 +2695,22 @@ a.contact-card:hover {
 
   .hero-inner {
     min-height: auto;
-    padding-top: clamp(72px, 9vh, 88px);
-    padding-bottom: 12px;
+    padding-top: clamp(78px, 10vh, 94px);
+    padding-bottom: 24px;
   }
 
   .hero-main {
     flex-direction: column;
     align-items: flex-start;
-    gap: 18px;
+    gap: 20px;
     margin-block: 0;
-    padding-block: 14px 18px;
+    padding-block: 16px 22px;
+  }
+
+  .hero-eyebrow {
+    font-size: clamp(1.32rem, 5.7vw, 1.95rem);
+    padding-right: 0.28em;
+    max-width: 100%;
   }
 
   .hero-right {
@@ -2773,33 +2720,54 @@ a.contact-card:hover {
   .hero-services {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 12px;
-    padding-top: 10px;
+    padding-top: 14px;
     margin-bottom: 0;
   }
 
   .about {
     min-height: auto;
-    padding-top: 28px;
-    padding-bottom: 50px;
+    padding-top: 40px;
+    padding-bottom: 60px;
   }
 
   .about-stack {
-    gap: 20px;
+    gap: 28px;
   }
 
-  .about-inner,
+  .about-inner {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 36px;
+  }
+
   .about-pillars {
     grid-template-columns: minmax(0, 1fr);
     align-items: start;
+    gap: 20px;
+  }
+
+  .about-lower {
     gap: 24px;
   }
 
   .about-hud-card {
-    margin-top: 16px;
+    margin-top: 20px;
+    padding: 20px 18px;
+    gap: 16px;
+  }
+
+  .about-footer {
+    gap: 14px 18px;
   }
 
   .holo-frame {
     max-width: 340px;
+  }
+
+  .trusted,
+  .services-section,
+  .contact {
+    padding-block: clamp(54px, 7.5vh, 76px);
   }
 
   .field-row {
@@ -2807,55 +2775,54 @@ a.contact-card:hover {
   }
 }
 
-@media (max-width: 1024px) {
-  .carousel-stage {
-    height: 490px;
-    perspective: 1100px;
-  }
-}
-
 @media (max-width: 600px) {
   .projects {
-    padding-block: clamp(44px, 8vh, 76px);
+    padding-block: clamp(52px, 7.5vh, 76px);
+  }
+
+  .carousel-container {
+    padding-inline: 0;
   }
 
   .carousel-stage {
     width: calc(100% - 76px);
-    height: 450px;
+    height: 375px;
     margin-block: 8px 14px;
-    perspective: 800px;
+    perspective: 1050px;
   }
 
   .carousel-card .project-body {
-    padding: 10px 12px;
-    gap: 4px;
+    padding: 9px 11px;
+    gap: 5px;
   }
 
   .carousel-card .project-title {
-    font-size: 0.88rem;
+    font-size: 0.86rem;
   }
 
   .carousel-card .project-desc {
-    font-size: 0.72rem;
-    -webkit-line-clamp: 2;
+    font-size: 0.70rem;
+    line-height: 1.38;
+    -webkit-line-clamp: 3;
+    flex: 0 1 auto;
   }
 
   .carousel-card .project-view-btn {
-    padding: 5px 12px;
+    padding: 5px 13px;
     font-size: 0.70rem;
   }
 
   .carousel-nav-btn {
-    width: 36px;
-    height: 36px;
+    width: 32px;
+    height: 32px;
   }
 
   .carousel-nav-btn--prev {
-    left: 4px;
+    left: 0;
   }
 
   .carousel-nav-btn--next {
-    right: 4px;
+    right: 0;
   }
 
   .services-grid {
@@ -2865,41 +2832,48 @@ a.contact-card:hover {
   .about-metrics {
     display: flex;
     flex-direction: row;
-    flex-wrap: nowrap;
-    gap: 8px;
+    flex-wrap: wrap;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 10px;
+    width: 100%;
     max-width: 100%;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    padding-bottom: 2px;
-  }
-
-  .about-metrics::-webkit-scrollbar {
-    display: none;
+    overflow: visible;
+    padding-bottom: 0;
   }
 
   .metric-card {
-    flex: 0 0 auto;
-    padding: 6px 10px;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 9px 12px;
   }
 
   .metric strong {
-    font-size: 1.05rem;
+    font-size: 1.04rem;
+    line-height: 1.25;
   }
 
   .metric span {
-    font-size: 0.62rem;
+    font-size: 0.68rem;
+    line-height: 1.3;
+    white-space: normal;
   }
 }
 
 @media (max-width: 480px) {
   .hero-inner {
-    padding-bottom: 8px;
+    padding-top: 76px;
+    padding-bottom: 22px;
   }
 
   .hero-main {
-    padding-block: 8px 12px;
-    gap: 14px;
+    padding-block: 12px 18px;
+    gap: 18px;
+  }
+
+  .hero-eyebrow {
+    font-size: clamp(1.26rem, 5.5vw, 1.65rem);
+    padding-right: 0.25em;
   }
 
   .hero-title {
@@ -2919,11 +2893,11 @@ a.contact-card:hover {
   .hero-services {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 8px;
-    padding-top: 8px;
+    padding-top: 12px;
   }
 
   .service-item {
-    padding: 3px 0;
+    padding: 4px 0;
   }
 
   .service-num {
@@ -2932,26 +2906,31 @@ a.contact-card:hover {
 
   .service-label {
     font-size: 0.72rem;
-    line-height: 1.22;
+    line-height: 1.25;
   }
 
   .about {
-    padding-top: 22px;
-    padding-bottom: 40px;
+    padding-top: 38px;
+    padding-bottom: 54px;
+  }
+
+  .about-inner {
+    gap: 32px;
   }
 
   .about-stack {
-    gap: 16px;
+    gap: 24px;
   }
 
   .about-hud-card {
-    margin-top: 14px;
-    padding: 16px 14px;
+    margin-top: 18px;
+    padding: 18px 16px;
   }
 
   .about-footer {
     flex-direction: column;
     align-items: flex-start;
+    gap: 14px;
   }
 
   .footer-inner {
@@ -2963,6 +2942,10 @@ a.contact-card:hover {
 @media (max-width: 350px) {
   .brand-name {
     font-size: 0.9rem;
+  }
+
+  .hero-eyebrow {
+    font-size: clamp(1.18rem, 5.6vw, 1.38rem);
   }
 
   .hero-services {
