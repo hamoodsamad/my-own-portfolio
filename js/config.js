@@ -30,14 +30,19 @@ export const FOCAL_CONFIG = Object.freeze({
   headRadiusY: 0.20,
 });
 
+const isLowMemoryDevice =
+  typeof navigator !== 'undefined' &&
+  typeof navigator.deviceMemory === 'number' &&
+  navigator.deviceMemory <= 2;
+
 /**
- * Performance tuning constants
+ * Performance & Visual Fidelity tuning constants
  */
 export const PERF_CONFIG = Object.freeze({
-  maxDesktopDpr: 1.5,
-  maxLaptopDpr: 1.25,
-  maxMobileDpr: 1.25,
+  maxDesktopDpr: isLowMemoryDevice ? 1.5 : 2.0,
+  maxLaptopDpr: isLowMemoryDevice ? 1.35 : 1.75,
+  maxMobileDpr: isLowMemoryDevice ? 1.35 : 1.75,
   maxConcurrency: 8,
   parallelBlobWorkers: 8,
-  smoothFilterQuality: 'medium', // Bilinear filtering for zero fill-rate stalls
+  smoothFilterQuality: 'high', // High-precision filtering for sharp Retina rendering
 });

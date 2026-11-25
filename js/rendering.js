@@ -64,9 +64,10 @@ export function resizeRenderer(vpW, vpH, rawDpr) {
   width = vpW;
   height = vpH;
 
-  // Cap canvasScale to 1.25 on standard laptops & mobile (halves pixel load with crisp retina detail)
-  // Allow up to 1.5 only on true 4K desktop screens (width >= 2200)
-  const maxScale = width >= 2200 ? PERF_CONFIG.maxDesktopDpr : PERF_CONFIG.maxLaptopDpr;
+  // Adaptive Retina DPR cap: crisp high-DPI visuals on phones, laptops & 4K monitors
+  let maxScale = PERF_CONFIG.maxLaptopDpr;
+  if (width >= 2200) maxScale = PERF_CONFIG.maxDesktopDpr;
+  else if (width < 768) maxScale = PERF_CONFIG.maxMobileDpr;
   canvasScale = Math.min(rawDpr, maxScale);
 
   targetCanvasW = Math.max(1, Math.round(width * canvasScale));
@@ -190,13 +191,13 @@ export function renderFrame(position, cachedStart, cachedEnd, scrollDir = 1, for
     }
   }
 
-  // Avoid redundant redraw if frame index and fractional alpha have not meaningfully changed
+  // Avoid redundant redraw if frame indices and fractional alpha have not meaningfully changed
+  const nextCeil = crossImg ? ceilIdx : -1;
   if (
     !force &&
     resolvedFloor === lastRenderedFloor &&
-    crossImg === null &&
-    lastRenderedCeil === -1 &&
-    Math.abs(frac - lastRenderedFrac) < 0.005
+    nextCeil === lastRenderedCeil &&
+    Math.abs(frac - lastRenderedFrac) < 0.003
   ) {
     return;
   }

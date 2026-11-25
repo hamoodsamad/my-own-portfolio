@@ -367,6 +367,7 @@ import { Security } from './security.js';
       slotAngleStep = 360 / slotCount;
 
       const { cardWidth, cardHeight, minRadius } = getResponsiveCardDimensions();
+      lastCylinderCardW = cardWidth;
       carouselCylinder.style.width = `${cardWidth}px`;
       carouselCylinder.style.height = `${cardHeight}px`;
 
@@ -409,8 +410,9 @@ import { Security } from './security.js';
         const img = document.createElement('img');
         img.src = imgSrc;
         img.alt = imgAlt;
-        img.loading = 'lazy';
+        img.loading = slot.projectIndex === 0 ? 'eager' : 'lazy';
         img.decoding = 'async';
+        if (slot.projectIndex === 0) img.fetchPriority = 'high';
         thumb.appendChild(img);
 
         const badge = document.createElement('span');
@@ -564,6 +566,11 @@ import { Security } from './security.js';
       }
     }
 
+    function handleResize() {
+      const { cardWidth } = getResponsiveCardDimensions();
+      handleBreakpointResize(cardWidth);
+    }
+
     function init() {
       if (categorySelectBtn) {
         categorySelectBtn.addEventListener('click', (e) => {
@@ -669,6 +676,7 @@ export {
   init,
   renderProjects,
   handleBreakpointResize,
+  handleResize,
   initVisibilityObserver,
   setSuspended,
 };
@@ -677,6 +685,7 @@ export const CarouselEngine = Object.freeze({
   init,
   renderProjects,
   handleBreakpointResize,
+  handleResize,
   initVisibilityObserver,
   setSuspended,
 });

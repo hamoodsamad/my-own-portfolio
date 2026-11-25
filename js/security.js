@@ -47,13 +47,33 @@ export function sanitizeUrl(url) {
  */
 export function sanitizeImageUrl(url) {
   if (!url) {
-    return 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=900&q=80';
+    return 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=1400&q=92';
   }
   const str = String(url).trim();
   if (/^(https?:\/\/|\/(?!\/)|\.\/|data:image\/(png|jpeg|jpg|webp|gif);base64,)/i.test(str)) {
-    return str;
+    return enhanceImageUrl(str);
   }
-  return 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=900&q=80';
+  return 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?auto=format&fit=crop&w=1400&q=92';
+}
+
+/**
+ * Enhances remote CDN image URLs (such as Unsplash) for crisp Retina/HD display quality.
+ * Leaves relative local assets and base64 data URIs untouched.
+ * @param {string} url
+ * @returns {string}
+ */
+export function enhanceImageUrl(url) {
+  if (!url || !/^https:\/\/images\.unsplash\.com\//i.test(url)) return url;
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set('auto', 'format');
+    parsed.searchParams.set('fit', 'crop');
+    parsed.searchParams.set('w', '1400');
+    parsed.searchParams.set('q', '92');
+    return parsed.toString();
+  } catch {
+    return url;
+  }
 }
 
 /**
@@ -70,5 +90,6 @@ export const Security = Object.freeze({
   escapeHTML,
   sanitizeUrl,
   sanitizeImageUrl,
+  enhanceImageUrl,
   sanitizeText,
 });

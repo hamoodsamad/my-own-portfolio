@@ -59,9 +59,13 @@ export function initSmoothScroll(onScrollCallback) {
 
   window.__lenis = lenisInstance;
 
-  // Integrate GSAP & ScrollTrigger if available
+  // Integrate GSAP, ScrollTrigger & SplitText if available
   if (window.gsap && window.ScrollTrigger) {
-    window.gsap.registerPlugin(window.ScrollTrigger);
+    if (window.SplitText) {
+      window.gsap.registerPlugin(window.ScrollTrigger, window.SplitText);
+    } else {
+      window.gsap.registerPlugin(window.ScrollTrigger);
+    }
 
     // Update ScrollTrigger and fire callback on Lenis scroll tick
     lenisInstance.on('scroll', (e) => {
@@ -103,6 +107,18 @@ export function initSmoothScroll(onScrollCallback) {
 
 export function getLenis() {
   return lenisInstance;
+}
+
+export function stopSmoothScroll() {
+  if (lenisInstance && typeof lenisInstance.stop === 'function') {
+    lenisInstance.stop();
+  }
+}
+
+export function startSmoothScroll() {
+  if (lenisInstance && typeof lenisInstance.start === 'function') {
+    lenisInstance.start();
+  }
 }
 
 /**
@@ -165,19 +181,79 @@ export function initScrollAnimations() {
     });
   };
 
-  // 1. Subtle upward fade-in for section headers
-  const headers = document.querySelectorAll('.about-title, .skills-head, .projects-head, .services-head, .contact-left');
-  headers.forEach((el) => {
+  // 1. Editorial masked word-by-word SplitText reveal for major headlines (GSAP 3.15)
+  const splitTargets = document.querySelectorAll('.about-title, .skills-head .section-title, .projects-head .section-title, .services-head .section-title, .contact-title');
+  const otherHeaders = document.querySelectorAll('.skills-head .section-eyebrow, .projects-head .projects-filter-box, .services-head .services-intro, .contact-left .contact-eyebrow, .contact-left .contact-lead, .contact-left .contact-cta-row');
+
+  if (typeof window.SplitText === 'function' && splitTargets.length > 0) {
+    const completedHeadlines = new WeakSet();
+    const runHeadlineSplits = () => {
+      splitTargets.forEach((headline) => {
+        if (completedHeadlines.has(headline)) return;
+        let lastAnim = null;
+        window.SplitText.create(headline, {
+          type: 'words',
+          mask: 'words',
+          autoSplit: true,
+          onSplit: (self) => {
+            if (completedHeadlines.has(headline)) {
+              self.revert();
+              return;
+            }
+            if (lastAnim) {
+              if (lastAnim.scrollTrigger) lastAnim.scrollTrigger.kill();
+              lastAnim.kill();
+            }
+            lastAnim = gsap.from(self.words, {
+              scrollTrigger: {
+                trigger: headline,
+                start: 'top 90%',
+                once: true,
+              },
+              yPercent: 105,
+              opacity: 0,
+              duration: 0.72,
+              stagger: 0.045,
+              ease: 'power4.out',
+              onComplete: () => {
+                completedHeadlines.add(headline);
+                self.revert();
+              },
+            });
+            return lastAnim;
+          },
+        });
+      });
+    };
+
+    if (document.fonts && typeof document.fonts.ready === 'object' && typeof document.fonts.ready.then === 'function') {
+      document.fonts.ready.then(runHeadlineSplits);
+    } else {
+      runHeadlineSplits();
+    }
+  } else {
+    splitTargets.forEach((el) => {
+      gsap.from(el, {
+        scrollTrigger: { trigger: el, start: 'top 90%', once: true },
+        opacity: 0,
+        y: 24,
+        duration: 0.8,
+        ease: 'power2.out',
+        clearProps: 'transform,opacity',
+      });
+    });
+  }
+
+  otherHeaders.forEach((el) => {
     gsap.from(el, {
       scrollTrigger: {
         trigger: el,
-        start: 'top 90%',
-        toggleActions: 'play none none none',
+        start: 'top 92%',
         once: true,
       },
       opacity: 0,
-      y: 24,
-      duration: 0.8,
+      y: 18,
+      duration: 0.7,
       ease: 'power2.out',
       clearProps: 'transform,opacity',
     });
@@ -317,5 +393,7 @@ export const SmoothScrollEngine = Object.freeze({
   initAnimations: initScrollAnimations,
   updateProgress: updateScrollProgress,
   scrollTo: scrollToTarget,
+  stop: stopSmoothScroll,
+  start: startSmoothScroll,
   get instance() { return lenisInstance; },
 });

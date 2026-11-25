@@ -34,6 +34,9 @@ let backgroundPreloadTimer = null;
 let lastDrawnFallbackBitmap = null;
 let consecutiveDecodeErrors = 0;
 let mobileMemoryEmergency = false;
+let lastTargetCanvasW = 1920;
+let lastTargetCanvasH = 1080;
+let lastTargetVpW = 1440;
 
 // Callbacks
 let onFrameReadyCallback = null;
@@ -219,7 +222,7 @@ export function decodeFrame(index, targetCanvasW = 1920, targetCanvasH = 1080, c
         return createImageBitmap(blob, {
           resizeWidth: targetW,
           resizeHeight: targetH,
-          resizeQuality: 'medium',
+          resizeQuality: 'high',
         }).catch(() => createImageBitmap(blob));
       }
       return new Promise((resolve) => {
@@ -323,6 +326,9 @@ export function pumpQueue(targetCanvasW, targetCanvasH, currentFramePos, vpW) {
  * Ensures neighborhood frames are decoded in sliding window.
  */
 export function ensureNeighborhood(centerIdx, direction = 1, filteredScrollVelocity = 0, targetCanvasW = 1920, targetCanvasH = 1080, vpW = 1440) {
+  lastTargetCanvasW = targetCanvasW;
+  lastTargetCanvasH = targetCanvasH;
+  lastTargetVpW = vpW;
   const absVel = Math.abs(filteredScrollVelocity);
   const lookahead = getAdaptiveLookahead(absVel);
   const lookbehind = Math.min(lookahead, absVel > 15 ? 32 : 24);
@@ -405,7 +411,7 @@ export function runBackgroundPreload(currentFramePos = 0, isUserScrolling = fals
           requestFrame(idx, false, cur);
         }
       });
-      pumpQueue(1920, 1080, cur, 1440);
+      pumpQueue(lastTargetCanvasW, lastTargetCanvasH, cur, lastTargetVpW);
 
       if (cachedBlobCount < FRAME_COUNT) {
         scheduleBackgroundPreload(isUserScrolling ? 60 : 15, currentFramePos, isUserScrolling);
@@ -434,6 +440,9 @@ if (typeof document !== 'undefined') {
 }
 
 export function preloadAnchorFrames(targetCanvasW, targetCanvasH, vpW) {
+  lastTargetCanvasW = targetCanvasW;
+  lastTargetCanvasH = targetCanvasH;
+  lastTargetVpW = vpW;
   const initialChunk = Math.min(15, FRAME_COUNT);
   for (let i = 0; i < initialChunk; i++) {
     requestFrame(i, true, 0);

@@ -49,7 +49,7 @@
       description:
         'Ultra-luxury horology storefront engineered for crisp product presentation, smooth browsing, and high conversion.',
       image:
-        'https://images.unsplash.com/photo-1523170335258-f5ed11844a49?auto=format&fit=crop&w=900&q=80',
+        'https://images.unsplash.com/photo-1523170335258-f5ed11844a49?auto=format&fit=crop&w=1400&q=92',
       link: 'https://github.com/hamoodsamad',
     },
     {
@@ -59,7 +59,7 @@
       description:
         'Quiet-luxury architectural archive showcasing spatial design work with editorial grids and fluid responsiveness.',
       image:
-        'https://images.unsplash.com/photo-1618221195710-dd6b41faaea6?auto=format&fit=crop&w=900&q=80',
+        'https://images.unsplash.com/photo-1618221195710-dd6b41faaea6?auto=format&fit=crop&w=1400&q=92',
       link: 'https://github.com/hamoodsamad',
     },
     {
@@ -69,7 +69,7 @@
       description:
         'High-converting athletic funnel featuring interactive membership flows, dynamic visual hierarchy, and mobile-first speed.',
       image:
-        'https://images.unsplash.com/photo-1534438327276-14e5300c3a48?auto=format&fit=crop&w=900&q=80',
+        'https://images.unsplash.com/photo-1534438327276-14e5300c3a48?auto=format&fit=crop&w=1400&q=92',
       link: 'https://github.com/hamoodsamad',
     },
     {
@@ -79,7 +79,7 @@
       description:
         'Artisan culinary digital menu and reservation experience crafted with warm visual storytelling and effortless navigation.',
       image:
-        'https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=900&q=80',
+        'https://images.unsplash.com/photo-1555396273-367ea4eb4db5?auto=format&fit=crop&w=1400&q=92',
       link: 'https://github.com/hamoodsamad',
     },
   ];
@@ -116,7 +116,11 @@
 
       let cfg = { ...DEFAULT_SUPABASE_CONFIG };
 
-      if (window.location.protocol !== 'file:') {
+      const isLocalDev =
+        window.location.protocol === 'file:' ||
+        /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname || '');
+
+      if (!isLocalDev) {
         try {
           const res = await fetch('/api/config', { cache: 'no-store' });
           if (res.ok) {
@@ -719,7 +723,7 @@
     }
   }
 
-  function compressImageFile(file, maxWidth = 900) {
+  function compressImageFile(file, maxWidth = 1400) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = (event) => {
@@ -730,8 +734,10 @@
           canvas.width = Math.max(1, Math.round(img.width * scale));
           canvas.height = Math.max(1, Math.round(img.height * scale));
           const ctx = canvas.getContext('2d');
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
           ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          resolve(canvas.toDataURL('image/jpeg', 0.82));
+          resolve(canvas.toDataURL('image/jpeg', 0.90));
         };
         img.onerror = reject;
         img.src = event.target.result;

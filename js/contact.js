@@ -5,6 +5,7 @@
 
 import { Security } from './security.js';
 import { closeMobileMenu } from './navigation.js';
+import { stopSmoothScroll, startSmoothScroll } from './smoothScroll.js';
 
 
     const store = window.PortfolioStore;
@@ -27,9 +28,7 @@ import { closeMobileMenu } from './navigation.js';
     }
 
     function openContactModal(serviceName, triggerEl) {
-      if (typeof NavigationController !== 'undefined') {
-        NavigationController.closeMobileMenu();
-      }
+      closeMobileMenu();
       if (!modal) return;
       // B9 Fix: Store focus trigger and configure accessible modal dialog attributes
       lastActiveElement = triggerEl || document.activeElement;
@@ -42,6 +41,7 @@ import { closeMobileMenu } from './navigation.js';
       }
       modal.hidden = false;
       document.body.style.overflow = 'hidden'; // B9 Fix: Lock body scroll while modal is active
+      stopSmoothScroll();
 
       const nameInput = document.getElementById('inq-name');
       if (nameInput) nameInput.focus();
@@ -51,6 +51,7 @@ import { closeMobileMenu } from './navigation.js';
       if (!modal || modal.hidden) return;
       modal.hidden = true;
       document.body.style.overflow = ''; // B9 Fix: Restore body scroll
+      startSmoothScroll();
 
       // B9 Fix: Return focus to trigger element that opened modal
       if (lastActiveElement && typeof lastActiveElement.focus === 'function') {
@@ -132,9 +133,7 @@ import { closeMobileMenu } from './navigation.js';
       window.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
           closeContactModal();
-          if (typeof NavigationController !== 'undefined') {
-            NavigationController.closeMobileMenu();
-          }
+          closeMobileMenu();
         }
       });
 

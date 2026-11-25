@@ -117,7 +117,7 @@ export function bootstrap() {
       'resize',
       () => {
         onDebouncedResize();
-        CarouselEngine.renderProjects();
+        CarouselEngine.handleResize();
       },
       { passive: true },
     );
