@@ -279,6 +279,48 @@ export function initTextRecreation() {
     holoFrame.addEventListener('mouseenter', triggerHoloFullRecreate);
     holoFrame.addEventListener('click', triggerHoloFullRecreate);
 
+    // High-Tech 3D Magnetic Tilt Effect for AI Core Holo Frame
+    holoFrame.addEventListener('mousemove', (e) => {
+      if (window.matchMedia('(hover: none)').matches) return;
+      const rect = holoFrame.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const centerX = rect.width / 2;
+      const centerY = rect.height / 2;
+      const rotateX = ((y - centerY) / centerY) * -14;
+      const rotateY = ((x - centerX) / centerX) * 14;
+
+      if (window.gsap) {
+        window.gsap.to(holoFrame, {
+          rotationX: rotateX,
+          rotationY: rotateY,
+          transformPerspective: 1000,
+          scale: 1.03,
+          duration: 0.25,
+          ease: 'power1.out',
+          overwrite: 'auto',
+        });
+      } else {
+        holoFrame.style.transform = `perspective(1000px) rotateX(${rotateX.toFixed(2)}deg) rotateY(${rotateY.toFixed(2)}deg) scale3d(1.03, 1.03, 1.03)`;
+      }
+    });
+
+    holoFrame.addEventListener('mouseleave', () => {
+      if (window.gsap) {
+        window.gsap.to(holoFrame, {
+          rotationX: 0,
+          rotationY: 0,
+          scale: 1,
+          duration: 0.6,
+          ease: 'power2.out',
+          overwrite: 'auto',
+        });
+      } else {
+        holoFrame.style.transition = 'transform 0.55s cubic-bezier(0.16, 1, 0.3, 1)';
+        holoFrame.style.transform = 'perspective(1000px) rotateX(0deg) rotateY(0deg) scale3d(1, 1, 1)';
+      }
+    });
+
     const holoBadge = holoFrame.querySelector('.holo-badge');
     if (holoBadge) {
       holoBadge.style.cursor = 'pointer';

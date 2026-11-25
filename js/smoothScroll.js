@@ -156,6 +156,7 @@ export function initScrollAnimations() {
       scale: 0.95,
       duration: 1.0,
       ease: 'power3.out',
+      clearProps: 'transform',
     });
   }
 
