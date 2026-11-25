@@ -193,6 +193,23 @@ export function triggerHoloGlitch(holoFrame) {
   if (!holoFrame) return;
   restartClass(holoFrame, 'is-reconstructing');
   restartClass(holoFrame, 'is-glitching');
+
+  // Hard-restart the person portrait keyframe animation by clearing and resetting inline animation style
+  const holoImg = holoFrame.querySelector('.holo-img');
+  if (holoImg) {
+    holoImg.style.animation = 'none';
+    void holoImg.offsetWidth;
+    holoImg.style.animation = '';
+  }
+
+  // Hard-restart scanline laser beam
+  const scanline = holoFrame.querySelector('.holo-scanline');
+  if (scanline) {
+    scanline.style.animation = 'none';
+    void scanline.offsetWidth;
+    scanline.style.animation = '';
+  }
+
   const wipe = holoFrame.querySelector('[data-recreate-wipe]');
   if (wipe) restartClass(wipe, 'recreate-wipe');
   holoFrame.querySelectorAll('[data-recreate-text]').forEach((el) => {

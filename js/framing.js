@@ -34,16 +34,16 @@ export function computeFramingForProgress(progress, vpW, vpH, imgW, imgH) {
 
   if (isPhonePortrait) {
     // Phone Portrait: Place subject gracefully on right (70% width) so hero copy stays clear on left.
-    // Head sits comfortably under mobile navbar at natural human scale (~23% of viewport height).
+    // Head sits comfortably under mobile navbar at natural human scale.
+    // Proportional scale is anchored to viewport width (vpW) so dynamic mobile address-bar collapse/expansion
+    // NEVER causes sudden image scale jumping, resizing jerks, or vertical pops.
     targetScreenX = 0.70;
     targetScreenY = 0.34;
-    safeNavbarTop = Math.max(68, vpH * 0.08);
+    safeNavbarTop = 68;
     layoutMode = 'phone-portrait';
 
-    const desiredHeadH = vpH * 0.23;
-    const srcHeadH = activeH * 0.36;
-    scale = desiredHeadH / srcHeadH;
-    // Ensure image width covers phone width with breathing room
+    // Width-anchored proportional scaling (maintains natural ~0.50 scale on 390px phone)
+    scale = (vpW * 2.46) / activeW;
     const minScaleW = (vpW * 1.08) / activeW;
     scale = Math.max(scale, minScaleW);
   } else if (isTabletPortrait) {
@@ -76,12 +76,20 @@ export function computeFramingForProgress(progress, vpW, vpH, imgW, imgH) {
   const focalPxY = activeH * focalNormY * scale;
 
   let desiredOffsetX = vpW * targetScreenX - focalPxX;
-  let desiredOffsetY = vpH * targetScreenY - focalPxY;
+  let desiredOffsetY;
 
-  // Ensure top of head (focal - headRadius) never hides under navbar
-  const headTopPx = desiredOffsetY + activeH * (focalNormY - FOCAL_CONFIG.headRadiusY) * scale;
-  if (headTopPx < safeNavbarTop) {
-    desiredOffsetY += (safeNavbarTop - headTopPx);
+  if (isPhonePortrait) {
+    // Top of head sits naturally 12px below mobile navbar, independent of URL bar state
+    const headTopOffset = activeH * (focalNormY - FOCAL_CONFIG.headRadiusY) * scale;
+    desiredOffsetY = safeNavbarTop - headTopOffset + 12;
+  } else {
+    desiredOffsetY = vpH * targetScreenY - focalPxY;
+
+    // Ensure top of head (focal - headRadius) never hides under navbar
+    const headTopPx = desiredOffsetY + activeH * (focalNormY - FOCAL_CONFIG.headRadiusY) * scale;
+    if (headTopPx < safeNavbarTop) {
+      desiredOffsetY += (safeNavbarTop - headTopPx);
+    }
   }
 
   // Clamping: horizontally never reveal empty side edges
@@ -120,7 +128,9 @@ export function computeFramingForProgress(progress, vpW, vpH, imgW, imgH) {
  */
 export function getInterpolatedDrawRect(position, cachedStart, cachedEnd, totalFrames) {
   if (!cachedStart || !cachedEnd) {
-    return { offsetX: 0, offsetY: 0, drawW: 1920, drawH: 1080, mode: 'cover' };
+    const vpW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
+    const vpH = typeof window !== 'undefined' ? (window.innerHeight || 1080) : 1080;
+    return computeFramingForProgress(0, vpW, vpH, 1920, 1080);
   }
   const t = Math.min(1, Math.max(0, position / (totalFrames - 1)));
   return {

@@ -35,8 +35,12 @@ let targetCanvasH = 1080;
 let maxScrollCache = 1;
 let cachedSectionOffsets = [];
 
-let cachedStartDrawRect = null;
-let cachedEndDrawRect = null;
+let cachedStartDrawRect = typeof window !== 'undefined'
+  ? computeFramingForProgress(0, window.innerWidth || 1920, window.innerHeight || 1080, 1920, 1080)
+  : null;
+let cachedEndDrawRect = typeof window !== 'undefined'
+  ? computeFramingForProgress(1, window.innerWidth || 1920, window.innerHeight || 1080, 1920, 1080)
+  : null;
 
 let targetFrame = 0;
 let currentFrame = 0;
@@ -84,7 +88,17 @@ export function scrollYToFrame(scrollY) {
 }
 
 export function updateLayoutCaches(trackedSections = []) {
-  if (window.visualViewport) {
+  const isTouch = typeof window !== 'undefined' && (('ontouchstart' in window) || (navigator.maxTouchPoints > 0) || window.innerWidth < 1024);
+
+  if (isTouch) {
+    // On mobile devices, clientWidth is completely stable across dynamic address-bar hide/show
+    width = document.documentElement.clientWidth || window.innerWidth;
+    const curH = window.innerHeight;
+    // Only update height on substantial changes (e.g. orientation flip), not minor address-bar expansions
+    if (!height || Math.abs(curH - height) > 140) {
+      height = curH;
+    }
+  } else if (window.visualViewport) {
     width = Math.round(window.visualViewport.width);
     height = Math.round(window.visualViewport.height);
   } else {
@@ -395,8 +409,15 @@ export function initScrollEngine(canvasElement, trackedSections = []) {
 
   // Layout observer on documentElement
   if (typeof ResizeObserver === 'function') {
-    docResizeObserver = new ResizeObserver(() => {
-      updateLayoutCaches(trackedSections);
+    docResizeObserver = new ResizeObserver((entries) => {
+      const entry = entries && entries[0];
+      if (entry && entry.contentRect) {
+        const newW = Math.round(entry.contentRect.width);
+        // Only update layout caches on actual structural container resize, not tiny mobile scrollbar shifts
+        if (Math.abs(newW - width) > 12) {
+          updateLayoutCaches(trackedSections);
+        }
+      }
     });
     docResizeObserver.observe(document.documentElement);
   }
