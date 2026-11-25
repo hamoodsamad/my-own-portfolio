@@ -281,8 +281,8 @@ export function initTextRecreation() {
 
     // High-Tech 3D Magnetic Tilt Effect for AI Core Holo Frame
     holoFrame.addEventListener('mousemove', (e) => {
-      if (window.matchMedia('(hover: none)').matches) return;
       const rect = holoFrame.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
       const centerX = rect.width / 2;
@@ -320,19 +320,6 @@ export function initTextRecreation() {
         holoFrame.style.transform = 'perspective(1000px) rotateX(0deg) rotateY(0deg) scale3d(1, 1, 1)';
       }
     });
-
-    const holoBadge = holoFrame.querySelector('.holo-badge');
-    if (holoBadge) {
-      holoBadge.style.cursor = 'pointer';
-      holoBadge.addEventListener('mouseenter', triggerHoloFullRecreate);
-      holoBadge.addEventListener('click', triggerHoloFullRecreate);
-    }
-
-    const badgeText = holoFrame.querySelector('.holo-badge-text');
-    if (badgeText) {
-      badgeText.addEventListener('mouseenter', triggerHoloFullRecreate);
-      badgeText.addEventListener('click', triggerHoloFullRecreate);
-    }
 
     if ('IntersectionObserver' in window) {
       const holoObserver = new IntersectionObserver(

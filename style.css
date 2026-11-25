@@ -200,6 +200,22 @@ html.lenis, html.lenis body {
   pointer-events: none;
 }
 
+/* Sleek Cybernetic Scroll Progress Bar */
+.scroll-progress-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 0%;
+  height: 2.5px;
+  background: linear-gradient(90deg, var(--accent), #ff8a5b, #00f0ff);
+  box-shadow: 0 0 10px rgba(255, 87, 25, 0.75), 0 0 16px rgba(0, 240, 255, 0.55);
+  z-index: 1001;
+  pointer-events: none;
+  transform-origin: left center;
+  transition: width 0.08s ease-out;
+  will-change: width;
+}
+
 .canvas-vignette {
   position: fixed;
   inset: 0;

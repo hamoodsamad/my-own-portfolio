@@ -22,9 +22,12 @@
     href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
     rel="stylesheet"
   />
-  <link rel="stylesheet" href="./style.css?v=2.5" />
+  <link rel="stylesheet" href="./style.css?v=2.7" />
 </head>
 <body>
+  <!-- Cybernetic Scroll Progress Indicator -->
+  <div class="scroll-progress-bar" id="scroll-progress-bar" aria-hidden="true"></div>
+
   <!-- Full-Screen Black Opening Curtain Animation -->
   <div class="page-intro" id="page-intro" aria-hidden="true">
     <div class="intro-curtain intro-curtain--top"></div>
@@ -241,23 +244,12 @@
                 <span class="holo-reticle-axis holo-reticle-axis--y"></span>
               </div>
 
-              <!-- AI Status Tag -->
-              <div class="holo-status-tag" aria-hidden="true">
-                <span class="holo-status-pulse"></span>
-                <span>AI ARCHITECT // CORE v3.8</span>
-              </div>
-
               <img
                 src="./assets/ai-digital-architect.jpg"
                 alt="Futuristic 3D AI Digital Architect Core and Neural Web Engineering Model"
                 class="holo-img"
                 loading="lazy"
               />
-
-              <div class="holo-badge">
-                <span class="holo-dot" aria-hidden="true"></span>
-                <span class="holo-badge-text" data-recreate-text data-duration="1000">HS // DIGITAL ARCHITECT</span>
-              </div>
             </div>
           </div>
         </div>
@@ -676,11 +668,11 @@
   <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="./store.js?v=2.5"></script>
+  <script src="./store.js?v=2.7"></script>
   <!-- GSAP, ScrollTrigger & Lenis Smooth Scroll -->
   <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/lenis@1.1.18/dist/lenis.min.js"></script>
-  <script type="module" src="./js/main.js?v=2.5"></script>
+  <script type="module" src="./js/main.js?v=2.7"></script>
 </body>
 </html>

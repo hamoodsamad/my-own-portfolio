@@ -10,6 +10,26 @@ let lenisInstance = null;
 let isInitialized = false;
 
 /**
+ * Updates top cybernetic scroll progress indicator with GPU acceleration
+ * @param {number} scrollY Current vertical scroll position
+ */
+export function updateScrollProgress(scrollY) {
+  const progressBar = document.getElementById('scroll-progress-bar');
+  if (!progressBar) return;
+  const currentY = scrollY !== undefined ? scrollY : (window.scrollY || window.pageYOffset || 0);
+  const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
+  const progress = maxScroll > 0 ? Math.min(1, Math.max(0, currentY / maxScroll)) : 0;
+  progressBar.style.width = `${(progress * 100).toFixed(2)}%`;
+}
+
+// Auto-attach native scroll listener for immediate hardware-accelerated progress updates
+if (typeof window !== 'undefined') {
+  window.addEventListener('scroll', () => {
+    updateScrollProgress();
+  }, { passive: true });
+}
+
+/**
  * Initialize Lenis Smooth Scroll and connect with GSAP ticker & ScrollTrigger
  * @param {Function} onScrollCallback Synchronous scroll callback for canvas & nav updates
  * @returns {object|null} Lenis instance or null
@@ -26,13 +46,13 @@ export function initSmoothScroll(onScrollCallback) {
 
   // Configure Lenis with tuned momentum damping for butter-smooth gliding
   lenisInstance = new LenisClass({
-    duration: 1.15,
+    duration: 1.22,
     easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
     orientation: 'vertical',
     gestureOrientation: 'vertical',
     smoothWheel: true,
     wheelMultiplier: 1.0,
-    touchMultiplier: 1.0,
+    touchMultiplier: 1.15,
     syncTouch: false,
     infinite: false,
   });
@@ -46,6 +66,7 @@ export function initSmoothScroll(onScrollCallback) {
     // Update ScrollTrigger and fire callback on Lenis scroll tick
     lenisInstance.on('scroll', (e) => {
       window.ScrollTrigger.update();
+      updateScrollProgress(e.scroll);
       if (typeof onScrollCallback === 'function') {
         onScrollCallback(e);
       }
@@ -68,9 +89,12 @@ export function initSmoothScroll(onScrollCallback) {
     }
     requestAnimationFrame(raf);
 
-    if (typeof onScrollCallback === 'function') {
-      lenisInstance.on('scroll', onScrollCallback);
-    }
+    lenisInstance.on('scroll', (e) => {
+      updateScrollProgress(e.scroll);
+      if (typeof onScrollCallback === 'function') {
+        onScrollCallback(e);
+      }
+    });
   }
 
   isInitialized = true;
@@ -131,7 +155,7 @@ export function initScrollAnimations() {
 
   // 2. About section HUD card, Hologram portrait & Metrics entrance
   const aboutCard = document.querySelector('.about-hud-card');
-  const holoFrame = document.querySelector('.holo-frame');
+  const visualCol = document.querySelector('.about-visual-col');
   if (aboutCard) {
     gsap.from(aboutCard, {
       scrollTrigger: {
@@ -145,10 +169,10 @@ export function initScrollAnimations() {
       ease: 'power3.out',
     });
   }
-  if (holoFrame) {
-    gsap.from(holoFrame, {
+  if (visualCol) {
+    gsap.from(visualCol, {
       scrollTrigger: {
-        trigger: holoFrame,
+        trigger: visualCol,
         start: 'top 85%',
         once: true,
       },
@@ -156,7 +180,6 @@ export function initScrollAnimations() {
       scale: 0.95,
       duration: 1.0,
       ease: 'power3.out',
-      clearProps: 'transform',
     });
   }
 
@@ -278,11 +301,63 @@ export function initScrollAnimations() {
       ease: 'power2.out',
     });
   }
+
+  // 7. Multi-Plane Cinematic Scroll Parallax for About & Visual Core
+  const aboutSection = document.getElementById('about');
+  const visualCol = document.querySelector('.about-visual-col');
+  if (aboutSection) {
+    if (visualCol) {
+      gsap.to(visualCol, {
+        scrollTrigger: {
+          trigger: aboutSection,
+          start: 'top bottom',
+          end: 'bottom top',
+          scrub: 1.15,
+        },
+        y: -30,
+        ease: 'none',
+      });
+    }
+
+    if (aboutCard) {
+      gsap.to(aboutCard, {
+        scrollTrigger: {
+          trigger: aboutSection,
+          start: 'top bottom',
+          end: 'bottom top',
+          scrub: 0.95,
+        },
+        y: 16,
+        ease: 'none',
+      });
+    }
+  }
+
+  // 8. Projects Carousel Parallax Gliding Scrub
+  const projectsSection = document.getElementById('projects');
+  if (projectsSection && carouselContainer) {
+    gsap.to(carouselContainer, {
+      scrollTrigger: {
+        trigger: projectsSection,
+        start: 'top bottom',
+        end: 'bottom top',
+        scrub: 1.0,
+      },
+      y: -22,
+      ease: 'none',
+    });
+  }
+
+  // Initial calculation refresh for all ScrollTriggers
+  if (window.ScrollTrigger) {
+    window.ScrollTrigger.refresh();
+  }
 }
 
 export const SmoothScrollEngine = Object.freeze({
   init: initSmoothScroll,
   initAnimations: initScrollAnimations,
+  updateProgress: updateScrollProgress,
   scrollTo: scrollToTarget,
   get instance() { return lenisInstance; },
 });
