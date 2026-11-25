@@ -32,7 +32,7 @@ import {
   initScrollAnimations,
   scrollToTarget,
   SmoothScrollEngine,
-} from './smoothScroll.js?v=2.7';
+} from './smoothScroll.js';
 import {
   initNavigation,
   updateHeaderAndNav,

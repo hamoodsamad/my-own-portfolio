@@ -304,7 +304,6 @@ export function initScrollAnimations() {
 
   // 7. Multi-Plane Cinematic Scroll Parallax for About & Visual Core
   const aboutSection = document.getElementById('about');
-  const visualCol = document.querySelector('.about-visual-col');
   if (aboutSection) {
     if (visualCol) {
       gsap.to(visualCol, {
